@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FIT·LOG</title>
+<meta name="description" content="Il mio diario personale di allenamento, dieta e composizione corporea">
+<meta name="theme-color" content="#8E241E">
+<link rel="manifest" href="manifest.webmanifest">
+<!-- iOS PWA -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="FIT·LOG">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>FIT<span>·</span>LOG</h1>
+    <div class="who">Matteo · dal 14.08.2025</div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ==================== HOME ==================== -->
+<section id="tab-home" class="tab on">
+  <div class="rhead anim"><h2>Oggi</h2><div class="rule"></div><div class="sub" id="home-sub"></div></div>
+
+  <div id="meal-prompt"></div>
+
+  <div class="card anim">
+    <div class="ringrow">
+      <div class="ring">
+        <svg width="118" height="118" viewBox="0 0 118 118">
+          <circle class="bg" cx="59" cy="59" r="50"></circle>
+          <circle class="fg" id="ring-fg" cx="59" cy="59" r="50"></circle>
+        </svg>
+        <div class="num"><b id="ring-eaten">0</b><span id="ring-target">su 0 kcal</span></div>
+      </div>
+      <div style="flex:1">
+        <div class="stat" style="border:none;box-shadow:none;padding:0">
+          <div class="lbl">Calorie di oggi</div>
+          <div class="note" style="margin-top:4px">Conferma i pasti con un tap: le calorie del piano si sommano da sole.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="rhead anim"><h2>Composizione corporea</h2><div class="rule"></div></div>
+  <div class="grid3 anim" id="home-stats"></div>
+  <div class="card anim"><div class="chartbox"><canvas id="chart-home"></canvas></div></div>
+</section>
+
+<!-- ==================== DIETA ==================== -->
+<section id="tab-diet" class="tab">
+  <div class="rhead anim"><h2>Piano nutrizionale</h2><div class="rule"></div>
+    <div class="sub">Il piano del nutrizionista, giorno per giorno. Tocca il cerchio per confermare un pasto di oggi.</div></div>
+  <div class="chips anim" id="diet-chips" style="margin-bottom:12px"></div>
+  <div class="anim" id="diet-day-info" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap"></div>
+  <div class="card anim" id="diet-meals"></div>
+  <div class="note anim" id="diet-note"></div>
+</section>
+
+<!-- ==================== PALESTRA ==================== -->
+<section id="tab-gym" class="tab">
+  <div class="rhead anim"><h2>Allenamento</h2><div class="rule"></div>
+    <div class="sub">Scegli la scheda e premi Inizia: l'app ti guida serie per serie con i tempi di recupero.</div></div>
+  <div id="resume-banner"></div>
+  <div class="card anim">
+    <label class="f">Scheda</label>
+    <select id="ws-scheda" onchange="renderSessionForm()"></select>
+    <div id="session-form"></div>
+    <button class="btn" id="btn-start" onclick="startWorkout()">▶ Inizia allenamento</button>
+  </div>
+
+  <div class="rhead anim"><h2>Progressione carichi</h2><div class="rule"></div></div>
+  <div class="card anim">
+    <label class="f">Esercizio</label>
+    <select id="prog-ex" onchange="renderProgChart()"></select>
+    <div class="chartbox"><canvas id="chart-prog"></canvas></div>
+  </div>
+
+  <div class="rhead anim"><h2>Le mie schede</h2><div class="rule"></div></div>
+  <div class="anim" id="schede-list"></div>
+  <div class="card anim">
+    <label class="f">Nuova scheda — nome</label>
+    <input type="text" id="new-scheda" placeholder="es. Scheda A — Upper">
+    <button class="btn ghost" onclick="addScheda()">Crea scheda</button>
+  </div>
+
+  <div class="rhead anim"><h2>Sessioni recenti</h2><div class="rule"></div></div>
+  <div class="card anim" id="session-list"></div>
+</section>
+
+<!-- ==================== CORPO ==================== -->
+<section id="tab-corpo" class="tab">
+  <div class="rhead anim"><h2>Analisi della composizione corporea</h2><div class="rule"></div>
+    <div class="sub">Dati dalle scansioni InBody mensili</div></div>
+  <div class="card anim">
+    <div class="chips" id="metric-chips">
+      <button class="chip on" onclick="setMetric('peso',this)">Peso</button>
+      <button class="chip" onclick="setMetric('smm',this)">Muscolo</button>
+      <button class="chip" onclick="setMetric('bf',this)">% Grasso</button>
+      <button class="chip" onclick="setMetric('aec',this)">AEC</button>
+    </div>
+    <div class="chartbox"><canvas id="chart-body"></canvas></div>
+  </div>
+  <div class="card anim" id="bf-range-card"></div>
+
+  <div class="rhead anim"><h2>Nuova scansione</h2><div class="rule"></div></div>
+  <div class="card anim">
+    <label class="f">Data</label><input type="date" id="sc-date">
+    <div class="grid2">
+      <div><label class="f">Peso (kg)</label><input type="number" step="0.1" id="sc-peso" inputmode="decimal"></div>
+      <div><label class="f">Muscolo schel. (kg)</label><input type="number" step="0.1" id="sc-smm" inputmode="decimal"></div>
+      <div><label class="f">Grasso corporeo (%)</label><input type="number" step="0.1" id="sc-bf" inputmode="decimal"></div>
+      <div><label class="f">Rapporto AEC</label><input type="number" step="0.001" id="sc-aec" inputmode="decimal"></div>
+      <div><label class="f">Punteggio InBody</label><input type="number" id="sc-score" inputmode="numeric"></div>
+      <div><label class="f">Grasso viscerale</label><input type="number" id="sc-visc" inputmode="numeric"></div>
+    </div>
+    <label class="f">Note</label><input type="text" id="sc-note" placeholder="es. dopo settimana di scarico">
+    <button class="btn" onclick="addScan()">Salva scansione</button>
+  </div>
+
+  <div class="rhead anim"><h2>Storico scansioni</h2><div class="rule"></div></div>
+  <div class="card anim" id="scan-list"></div>
+</section>
+
+<!-- ==================== ADMIN ==================== -->
+<section id="tab-admin" class="tab">
+  <div class="rhead anim"><h2>Admin</h2><div class="rule"></div>
+    <div class="sub">Configurazione della settimana, orari pasti, editor dieta, AI e backup.</div></div>
+
+  <details class="anim" open>
+    <summary>Impostazioni settimana e orari</summary>
+    <div class="inner">
+      <label class="f">Il GIORNO 1 della dieta è di…</label>
+      <select id="ad-giorno1"></select>
+      <div class="grid2" style="margin-top:4px">
+        <div><label class="f">Colazione</label><input type="time" id="mt-col"></div>
+        <div><label class="f">Spuntino</label><input type="time" id="mt-spu"></div>
+        <div><label class="f">Pranzo</label><input type="time" id="mt-pra"></div>
+        <div><label class="f">Merenda</label><input type="time" id="mt-mer"></div>
+        <div><label class="f">Cena</label><input type="time" id="mt-cen"></div>
+        <div><label class="f">Post-allenamento</label><input type="time" id="mt-post"></div>
+      </div>
+      <label class="f" style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" id="ad-notif" onchange="toggleNotif()"> Notifiche promemoria pasti
+      </label>
+      <div class="note">Su iPhone le notifiche funzionano solo con l'app installata in Home (iOS 16.4+) e finché l'app è aperta o in background recente: il promemoria all'apertura resta sempre attivo.</div>
+      <button class="btn" onclick="saveSettings()">Salva impostazioni</button>
+    </div>
+  </details>
+
+  <details class="anim">
+    <summary>Editor dieta (alimenti e calorie)</summary>
+    <div class="inner">
+      <div class="chips" id="adm-diet-chips" style="margin-bottom:8px"></div>
+      <div id="adm-diet-body"></div>
+    </div>
+  </details>
+
+  <details class="anim">
+    <summary>Gemini AI</summary>
+    <div class="inner">
+      <label class="f">API key (aistudio.google.com)</label>
+      <input type="password" id="gem-key" placeholder="AIza…">
+      <label class="f">Modello</label>
+      <input type="text" id="gem-model" placeholder="gemini-2.5-flash">
+      <label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="gem-ctx"> Includi i miei dati nel contesto</label>
+      <div class="note">La chiave resta salvata solo su questo dispositivo, non finisce mai su GitHub.</div>
+      <button class="btn" onclick="saveSettings()">Salva</button>
+    </div>
+  </details>
+
+  <details class="anim">
+    <summary>Backup dei dati</summary>
+    <div class="inner">
+      <div class="note">Se elimini l'app dalla Home di iPhone, iOS cancella anche i dati: esporta un backup ogni tanto.</div>
+      <button class="btn ghost" onclick="exportBackup()">⬇ Esporta backup (JSON)</button>
+      <label class="f" style="margin-top:14px">Importa backup</label>
+      <input type="file" accept="application/json" onchange="importBackup(this)">
+    </div>
+  </details>
+</section>
+
+</div>
+
+<!-- Workout player -->
+<div id="player">
+  <div class="pl-head">
+    <button class="x" style="font-size:1.2rem" onclick="abortWorkout()">✕</button>
+    <div style="text-align:center">
+      <div class="pl-title" id="pl-title">Allenamento</div>
+      <div class="pl-elapsed" id="pl-elapsed">00:00</div>
+    </div>
+    <button class="btn small soft" onclick="finishWorkout()">Fine ✓</button>
+  </div>
+  <div class="pl-dots" id="pl-dots"></div>
+  <div id="pl-body"></div>
+</div>
+
+<!-- FAB AI -->
+<button class="fab" onclick="openAIChat()" aria-label="Assistente AI">✦</button>
+
+<!-- Bottom sheet -->
+<div class="sheet-bg" id="sheet-bg"></div>
+<div class="sheet" id="sheet"><div class="grab"></div><div id="sheet-body"></div></div>
+
+<div id="toast" role="status"></div>
+
+<nav>
+  <button data-t="home" class="on"><span class="ic">▦</span>Home</button>
+  <button data-t="diet"><span class="ic">◈</span>Dieta</button>
+  <button data-t="gym"><span class="ic">▲</span>Palestra</button>
+  <button data-t="corpo"><span class="ic">◑</span>Corpo</button>
+  <button data-t="admin"><span class="ic">⚙</span>Admin</button>
+</nav>
+
+<script src="js/data-diet.js"></script>
+<script src="js/app.js"></script>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>
