@@ -17,7 +17,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<!-- Chart.js in locale: nessuna dipendenza da CDN, funziona anche offline -->
+<script src="js/chart.umd.min.js"></script>
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -110,7 +111,9 @@
       <button class="chip on" onclick="setMetric('peso',this)">Peso</button>
       <button class="chip" onclick="setMetric('smm',this)">Muscolo</button>
       <button class="chip" onclick="setMetric('bf',this)">% Grasso</button>
+      <button class="chip" onclick="setMetric('fatkg',this)">Grasso kg</button>
       <button class="chip" onclick="setMetric('aec',this)">AEC</button>
+      <button class="chip" onclick="setMetric('bmr',this)">Basale</button>
     </div>
     <div class="chartbox"><canvas id="chart-body"></canvas></div>
   </div>
@@ -123,7 +126,9 @@
       <div><label class="f">Peso (kg)</label><input type="number" step="0.1" id="sc-peso" inputmode="decimal"></div>
       <div><label class="f">Muscolo schel. (kg)</label><input type="number" step="0.1" id="sc-smm" inputmode="decimal"></div>
       <div><label class="f">Grasso corporeo (%)</label><input type="number" step="0.1" id="sc-bf" inputmode="decimal"></div>
+      <div><label class="f">Grasso (kg)</label><input type="number" step="0.1" id="sc-fatkg" inputmode="decimal"></div>
       <div><label class="f">Rapporto AEC</label><input type="number" step="0.001" id="sc-aec" inputmode="decimal"></div>
+      <div><label class="f">Metab. basale (kcal)</label><input type="number" id="sc-bmr" inputmode="numeric"></div>
       <div><label class="f">Punteggio InBody</label><input type="number" id="sc-score" inputmode="numeric"></div>
       <div><label class="f">Grasso viscerale</label><input type="number" id="sc-visc" inputmode="numeric"></div>
     </div>
