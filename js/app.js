@@ -36,7 +36,7 @@ function loadDB(){
   if(!DB) DB=seed();
   // migrazioni soft
   DB.notified=DB.notified||{}; DB.diary=DB.diary||{}; DB.chat=DB.chat||[];
-  DB.activeWorkout=DB.activeWorkout||null;
+  DB.activeWorkout=DB.activeWorkout||null; DB.exTrans=DB.exTrans||{}; // cache istruzioni tradotte in italiano
   // migrazione esercizi: target "4×8" → serie/reps/recupero strutturati
   DB.schede.forEach(s=>s.esercizi.forEach(e=>{
     if(e.sets==null){
@@ -255,7 +255,7 @@ function renderSessionForm(){
   const sch=DB.schede.find(s=>s.id==$('#ws-scheda').value);
   $('#session-form').innerHTML=sch&&sch.esercizi.length?
     `<div class="note" style="margin:10px 0 0">${sch.esercizi.length} esercizi · `+
-    sch.esercizi.map(e=>esc(e.nome)+' '+e.sets+'×'+e.reps).join(' · ')+'</div>'
+    sch.esercizi.map(e=>esc(e.nome)+' '+schemeLabel(e)).join(' · ')+'</div>'
   :'<div class="note" style="margin-top:12px">Crea una scheda e aggiungi gli esercizi qui sotto.</div>';
   $('#btn-start').style.display=sch&&sch.esercizi.length?'block':'none';
 }
@@ -271,6 +271,43 @@ function lastWeight(exName){ // precompila col peso dell'ultima volta
   return '';
 }
 function entrySets(e){return e.sets?e.sets:[{p:e.peso||0,r:e.reps||0}];}
+/* ---- schema ripetizioni per serie (es. "12-10-8-8" o "3x8 + 1x8 + MAX") ---- */
+function normRep(t){return /max/i.test(t)?'MAX':(parseInt(t)||0);}
+function parseScheme(str){
+  if(!str)return null; const out=[];
+  String(str).split('+').forEach(g=>{
+    g=g.trim(); if(!g)return;
+    const m=g.match(/^(\d+)\s*[x×]\s*(.+)$/i); // "3x8" oppure "3 x MAX"
+    if(m){const n=Math.min(20,parseInt(m[1])||1),rep=normRep(m[2]);for(let i=0;i<n;i++)out.push(rep);return;}
+    g.split(/[-,·\/]/).forEach(t=>{t=t.trim();if(t)out.push(normRep(t));});
+  });
+  return out.length?out:null;
+}
+function firstRep(scheme){const n=scheme.find(x=>typeof x==='number'&&x>0);return n||8;}
+function exScheme(ex){return ex.scheme&&ex.scheme.length?ex.scheme:Array(ex.sets||3).fill(ex.reps||10);} // array target per serie
+function schemeLabel(ex){const s=exScheme(ex);return s.every(x=>x===s[0])?s.length+'×'+s[0]:s.join('·');}
+/* ---- vocabolario libreria esercizi → italiano ---- */
+const IT_MUSC={chest:'pettorali',triceps:'tricipiti',biceps:'bicipiti',shoulders:'spalle',forearms:'avambracci',
+  forearm:'avambracci',forerm:'avambracci',lats:'dorsali','middle back':'schiena centrale','upper back':'schiena alta',
+  back:'schiena','lower back':'lombari',traps:'trapezi',trapezius:'trapezi',neck:'collo','neck extensors':'collo',
+  'neck flexors':'collo','neck side flexors':'collo',quadriceps:'quadricipiti',hamstrings:'femorali',hamstring:'femorali',
+  glutes:'glutei',gluts:'glutei',calves:'polpacci',abdominals:'addominali','lower abdominals':'addominali bassi',
+  obliques:'obliqui',core:'core',arms:'braccia',adductors:'adduttori',abductors:'abduttori','hip abductors':'abduttori',
+  'lateral deltoid':'deltoide laterale','rear deltoid':'deltoide posteriore','posterior deltoid':'deltoide posteriore',
+  should:'spalle',bicpes:'bicipiti'};
+const IT_LEVEL={beginner:'principiante',intermediate:'intermedio',expert:'avanzato',
+  compound:'multiarticolare',isolation:'di isolamento',isometric:'isometrico'};
+const IT_EQUIP={barbell:'bilanciere',dumbbell:'manubri',dumbbells:'manubri',dumbell:'manubri',cable:'cavi',
+  'cable machine':'ai cavi',machine:'macchina',body:'corpo libero','body only':'corpo libero',bench:'panca',
+  'flat bench':'panca piana','incline bench':'panca inclinata','decline bench':'panca declinata','smith machine':'multipower',
+  bar:'sbarra','parallel bars':'parallele','bench press machine':'chest press','hyperextension bench':'panca lombare',
+  'chest machine':'macchina pettorali','butterfly machine':'pectoral machine','t-bar machine':'t-bar','v-bar':'maniglia a V',
+  kettlebells:'kettlebell',bands:'elastici',band:'elastici','exercise band':'elastici','medicine ball':'palla medica',
+  'exercise ball':'fitball','swiss ball':'fitball','stability ball':'fitball','bosu ball':'bosu','balance board':'tavoletta propriocettiva',
+  'weight plate':'disco',weight:'peso','barbell or dumbbell':'bilanciere o manubri','e-z curl bar':'bilanciere EZ',
+  other:'altro',none:'nessuno','foam roll':'foam roller'};
+const itMap=(m,v)=>v?(m[String(v).toLowerCase()]||v):v;
+function instrOL(steps){return '<ol style="padding-left:18px;font-size:.85rem;line-height:1.5;color:#44403C;margin-top:6px">'+steps.map(i=>'<li style="margin-bottom:6px">'+esc(i)+'</li>').join('')+'</ol>';}
 function startWorkout(){
   const sch=DB.schede.find(s=>s.id==$('#ws-scheda').value);
   if(!sch||!sch.esercizi.length){toast('Scheda vuota');return;}
@@ -327,6 +364,7 @@ function renderPlayer(){
   const done=PL.log[PL.exIdx]||[];
   const isRest=PL.rest&&PL.rest.until>Date.now();
   const totEx=sch.esercizi.length;
+  const scm=exScheme(ex), tgt=scm[PL.setIdx], tgtTxt=tgt==='MAX'?'MAX ripetizioni':tgt+' reps';
   $('#pl-title').textContent=sch.nome;
   $('#pl-dots').innerHTML=sch.esercizi.map((_,i)=>
     `<span class="dot ${i<PL.exIdx?'done':i===PL.exIdx?'cur':''}"></span>`).join('');
@@ -337,7 +375,7 @@ function renderPlayer(){
         <div class="pl-lbl">Recupero</div>
         <div class="pl-timer" id="pl-timer">--</div>
         <div class="pl-ringtrack"><div class="pl-ringfill" id="pl-ringfill"></div></div>
-        <div class="pl-next">Prossima: <b>${esc(ex.nome)}</b> — serie ${PL.setIdx+1} di ${ex.sets}</div>
+        <div class="pl-next">Prossima: <b>${esc(ex.nome)}</b> — serie ${PL.setIdx+1} di ${scm.length} · ${tgtTxt}</div>
         <div style="display:flex;gap:10px;margin-top:20px">
           <button class="btn small soft" style="flex:1" onclick="PL.rest.until+=30000;save()">+30 s</button>
           <button class="btn small" style="flex:1" onclick="endRest()">Salta recupero ▸</button>
@@ -347,31 +385,60 @@ function renderPlayer(){
     return;
   }
   const sugg=ex.peso||lastWeight(ex.nome);
+  const nameJs=esc(ex.nome).replace(/'/g,"\\'");
   $('#pl-body').innerHTML=`
     <div class="pl-ex">
-      <div class="pl-lbl">Esercizio ${PL.exIdx+1} di ${totEx}</div>
-      <a href="#" class="pl-exname" onclick="openExDetailByName('${esc(ex.nome).replace(/'/g,"\\'")}','${ex.dbId||''}');return false">${esc(ex.nome)} ▸</a>
-      <div class="pl-target">Serie <b>${PL.setIdx+1}</b> di ${ex.sets} · obiettivo ${ex.reps} reps · recupero ${ex.rest}s</div>
+      <div class="pl-hero noimg" id="pl-hero" onclick="openExDetailByName('${nameJs}','${ex.dbId||''}')" role="button" aria-label="Dettaglio esercizio ${esc(ex.nome)}">
+        <div class="pl-hero-grad"></div>
+        <div class="pl-hero-cap">
+          <div class="pl-hero-sub">Esercizio ${PL.exIdx+1} di ${totEx}</div>
+          <div class="pl-hero-name">${esc(ex.nome)} ▸</div>
+        </div>
+      </div>
+      <div class="pl-setbar">${scm.map((rp,i)=>`<span class="pl-setpill ${i<PL.setIdx?'done':i===PL.setIdx?'cur':''}">${rp==='MAX'?'MAX':rp}</span>`).join('')}</div>
+      <div class="pl-target">Serie <b>${PL.setIdx+1}</b> di ${scm.length} · obiettivo ${tgtTxt} · recupero ${ex.rest}s</div>
+      ${ex.note?`<div class="pl-note">📌 ${esc(ex.note)}</div>`:''}
       <div class="pl-inputs">
         <div><span class="mini">Peso kg</span><input type="number" step="0.5" inputmode="decimal" id="pl-p" value="${sugg}"></div>
-        <div><span class="mini">Reps</span><input type="number" inputmode="numeric" id="pl-r" value="${ex.reps}"></div>
+        <div><span class="mini">Reps</span><input type="number" inputmode="numeric" id="pl-r" value="${tgt==='MAX'?'':tgt}" placeholder="${tgt==='MAX'?'max':''}"></div>
       </div>
-      ${DB.settings.gemKey?`<button class="btn small ghost" style="max-width:300px;margin:12px auto 0" onclick="suggestWeight()">✦ Peso consigliato dall'AI</button><div id="pl-ai"></div>`:''}
+      <div class="pl-rpe">
+        <div class="rpe-lbl"><span class="mini">Sforzo percepito (RPE)</span><span class="rpe-hint">6 facile · 10 massimale</span></div>
+        <div class="rpe-row">${[6,7,8,9,10].map(v=>`<button class="rpe${plRpe===v?' on':''}" data-v="${v}" onclick="setRpe(${v})">${v}</button>`).join('')}</div>
+      </div>
+      ${DB.settings.gemKey?`<button class="btn small ghost" style="max-width:320px;margin:14px auto 0" onclick="suggestWeight()">✦ Peso consigliato dall'AI</button><div id="pl-ai"></div>`:''}
       <button class="btn pl-done" onclick="completeSet()">✓ Serie completata</button>
-      ${done.length?`<div class="pl-log">${done.map((s,i)=>`<span class="pill g">S${i+1}: ${s.p}kg×${s.r}</span>`).join(' ')}</div>`:''}
+      ${done.length?`<div class="pl-log">${done.map((s,i)=>`<span class="pill g">S${i+1}: ${s.p}kg×${s.r}${s.rpe?' · RPE'+s.rpe:''}</span>`).join(' ')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:18px">
         ${PL.exIdx>0?'<button class="btn small ghost" style="flex:1" onclick="prevEx()">← Prec.</button>':''}
         <button class="btn small ghost" style="flex:1" onclick="nextEx()">${PL.exIdx<totEx-1?'Salta es. →':'Fine ✓'}</button>
       </div>
     </div>`;
+  loadPlayerHero(ex);
 }
+// carica l'illustrazione dell'esercizio nel player (crossfade fra le 2 pose)
+let plHeroT=null;
+async function loadPlayerHero(ex){
+  clearTimeout(plHeroT);
+  const hero=$('#pl-hero'); if(!hero||!ex.dbId)return; // esercizio manuale → resta la card maroon
+  try{
+    await loadEXDB();
+    const e=EXDB.find(x=>x.id===ex.dbId);
+    if(!e||!(e.images||[]).length)return;
+    const imgs=e.images.map((p,i)=>`<img class="exframe" data-i="${i}" src="${EXIMG+p}" alt="" onload="var h=this.closest('.pl-hero');if(h)h.classList.remove('noimg')" onerror="this.remove()">`).join('');
+    const h=$('#pl-hero'); if(!h)return; h.insertAdjacentHTML('afterbegin',imgs);
+    if(e.images.length>1)(function loop(){const hh=$('#pl-hero');if(!hh)return;hh.classList.toggle('show1');plHeroT=setTimeout(loop,1300);})();
+  }catch(_){}
+}
+let plRpe=null;
+function setRpe(v){ plRpe=(plRpe===v?null:v); $$('.pl-rpe .rpe').forEach(b=>b.classList.toggle('on',+b.dataset.v===plRpe)); haptic(); }
 function completeSet(){
   const ex=plExercise(); if(!ex)return;
   const p=parseFloat($('#pl-p').value)||0, r=parseInt($('#pl-r').value)||0;
   PL.log[PL.exIdx]=PL.log[PL.exIdx]||[];
-  PL.log[PL.exIdx].push({p,r});
+  PL.log[PL.exIdx].push({p,r,rpe:plRpe||null}); plRpe=null;
   haptic();
-  const lastSetOfEx=PL.setIdx+1>=ex.sets;
+  const lastSetOfEx=PL.setIdx+1>=exScheme(ex).length;
   if(lastSetOfEx){
     const sch=DB.schede.find(s=>s.id===PL.schedaId);
     if(PL.exIdx+1>=sch.esercizi.length){DB.activeWorkout=PL;save();finishWorkout();return;}
@@ -429,23 +496,24 @@ function delEx(sid,idx){
 function renderSchede(){
   $('#schede-list').innerHTML=DB.schede.map(s=>
     `<details data-id="${s.id}"><summary>${esc(s.nome)}<span class="s" style="margin-right:auto;margin-left:8px;color:var(--muted)">${s.esercizi.length} esercizi</span></summary><div class="inner">`+
-    (s.esercizi.map((e,i)=>`<div class="row"><div class="t">${esc(e.nome)} <span class="s">${e.sets}×${e.reps} · rec ${e.rest}s${e.peso?' · ultimo '+e.peso+'kg':''}</span></div>
+    (s.esercizi.map((e,i)=>`<div class="row"><div class="t">${esc(e.nome)} <span class="s">${schemeLabel(e)} · rec ${e.rest}s${e.peso?' · ultimo '+e.peso+'kg':''}</span>${e.note?`<div class="s" style="color:var(--maroon)">📌 ${esc(e.note)}</div>`:''}</div>
       <button class="x" onclick="delEx(${s.id},${i})">✕</button></div>`).join('')||'<span class="note">Nessun esercizio.</span>')+
-    `<button class="btn small" style="margin-top:12px" onclick="openExSearch(${s.id})">🔍 Aggiungi dalla libreria (873 esercizi)</button>
-     <label class="f" style="margin-top:12px">O a mano</label><input type="text" id="ex-n${s.id}" placeholder="es. Panca piana">
-     <div class="grid3" style="margin-top:8px">
-       <div><span class="mini">Serie</span><input type="number" id="ex-s${s.id}" value="4" inputmode="numeric"></div>
-       <div><span class="mini">Reps</span><input type="number" id="ex-r${s.id}" value="8" inputmode="numeric"></div>
+    `<button class="btn small" style="margin-top:12px" onclick="openExSearch(${s.id})">🔍 Aggiungi dalla libreria illustrata</button>
+     <label class="f" style="margin-top:12px">O a mano</label><input type="text" id="ex-n${s.id}" placeholder="es. Distensioni panca piana">
+     <div class="grid2" style="margin-top:8px">
+       <div><span class="mini">Ripetizioni (schema)</span><input type="text" id="ex-r${s.id}" value="4x8" placeholder="es. 12-10-8-8 o 3x8+1x8+MAX"></div>
        <div><span class="mini">Rec. (s)</span><input type="number" id="ex-w${s.id}" value="90" inputmode="numeric"></div>
      </div>
+     <input type="text" id="ex-note${s.id}" placeholder="Nota (facoltativa, es. ultima serie in stripping)" style="margin-top:8px">
      <button class="btn small ghost" style="margin-top:10px" onclick="addExManual(${s.id})">Aggiungi</button>
      <button class="btn small" style="margin-top:10px;margin-left:8px;background:#EFE9DC;color:var(--maroon)" onclick="delScheda(${s.id})">Elimina scheda</button>
     </div></details>`).join('')||'<div class="card"><span class="note">Nessuna scheda: creane una qui sotto e aggiungi gli esercizi dalla libreria illustrata.</span></div>';
 }
 function addExManual(sid){
   const n=$('#ex-n'+sid).value.trim(); if(!n)return;
-  DB.schede.find(s=>s.id===sid).esercizi.push({nome:n,
-    sets:parseInt($('#ex-s'+sid).value)||3,reps:parseInt($('#ex-r'+sid).value)||10,rest:parseInt($('#ex-w'+sid).value)||90});
+  const scheme=parseScheme($('#ex-r'+sid).value)||[8,8,8];
+  DB.schede.find(s=>s.id===sid).esercizi.push({nome:n,scheme,
+    sets:scheme.length,reps:firstRep(scheme),rest:parseInt($('#ex-w'+sid).value)||90,note:($('#ex-note'+sid).value||'').trim()});
   save(); renderGym();
   document.querySelector(`details[data-id="${sid}"]`)?.setAttribute('open','');
 }
@@ -457,7 +525,7 @@ function renderSessionList(){
   const ss=[...DB.sessions].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,15);
   $('#session-list').innerHTML=ss.length?ss.map(s=>{
     const sch=DB.schede.find(x=>x.id===s.schedaId);
-    const det=s.entries.map(e=>esc(e.esercizio)+' '+entrySets(e).map(x=>x.p+'×'+x.r).join(', ')).join(' · ');
+    const det=s.entries.map(e=>esc(e.esercizio)+' '+entrySets(e).map(x=>x.p+'×'+x.r+(x.rpe?'@'+x.rpe:'')).join(', ')).join(' · ');
     return `<div class="row"><div><div class="t">${fmtD(s.date)} — ${sch?esc(sch.nome):'Scheda'}${s.dur?' <span class="pill">'+s.dur+' min</span>':''}</div>
     <div class="s">${det}</div></div>
     <button class="x" onclick="delSession(${s.id})">✕</button></div>`;
@@ -486,23 +554,41 @@ function renderProgChart(){
 }
 
 /* ---------------- LIBRERIA ESERCIZI (open source, 873 esercizi) ---------------- */
-const EXDB_URL='https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/dist/exercises.json';
-const EXIMG='https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/';
+// Libreria illustrata (disegni line-art) — Everkinetic, CC BY-SA 4.0
+const EXDB_URL='https://raw.githubusercontent.com/everkinetic/data/master/exercises.json';
+const EXIMG='https://raw.githubusercontent.com/everkinetic/data/master/dist/svg/';
 let EXDB=null, exTargetScheda=null;
+const toArrLC=v=>Array.isArray(v)?v:(v?String(v).split(',').map(s=>s.trim()).filter(Boolean):[]);
+// normalizza un esercizio Everkinetic nello schema usato dall'app
+function normEx(e){
+  const idn=e.id_num||String(e.id||'').padStart(4,'0');
+  return {
+    id:'ek-'+idn,
+    name:e.title||e.name||'Esercizio',
+    images:[idn+'-relaxation.svg', idn+'-tension.svg'], // 2 pose: inizio → fine
+    primaryMuscles:[...toArrLC(e.primary), ...toArrLC(e.secondary)],
+    level:e.type||'',                 // compound/isolation/isometric → tradotto da IT_LEVEL
+    equipment:toArrLC(e.equipment).map(x=>itMap(IT_EQUIP,x)).join(', '),
+    instructions:e.steps||[]
+  };
+}
 const IT2EN={panca:'bench press',stacco:'deadlift',trazioni:'pull up',rematore:'row',spinte:'press',
   croci:'fly',alzate:'raise','alzate laterali':'lateral raise',affondi:'lunge',polpacci:'calf',
   'lat machine':'pulldown',bicipiti:'curl',tricipiti:'triceps',spalle:'shoulder',addominali:'ab',
   gambe:'leg',petto:'chest',schiena:'back',glutei:'glute',militare:'military press',squat:'squat'};
 async function loadEXDB(){
   if(EXDB)return EXDB;
-  const r=await fetch(EXDB_URL); EXDB=await r.json(); return EXDB;
+  const r=await fetch(EXDB_URL); const raw=await r.json();
+  EXDB=raw.map(normEx).filter(e=>e.name);
+  return EXDB;
 }
 function openExSearch(schedaId){
   exTargetScheda=schedaId;
   openSheet(`<h3>Libreria esercizi</h3>
-    <div class="note">873 esercizi con illustrazioni e istruzioni. Cerca in inglese o italiano (es. "panca", "squat", "curl").</div>
+    <div class="note">Esercizi illustrati con istruzioni. Cerca in inglese o italiano (es. "panca", "squat", "curl").</div>
     <input type="text" id="ex-q" placeholder="Cerca…" oninput="searchEx()" style="margin-top:10px">
-    <div id="ex-results" style="margin-top:8px"><div class="note">Caricamento libreria…</div></div>`);
+    <div id="ex-results" style="margin-top:8px"><div class="note">Caricamento libreria…</div></div>
+    <div class="note" style="opacity:.7;margin-top:12px">Illustrazioni: Everkinetic · CC BY-SA 4.0</div>`);
   loadEXDB().then(()=>{$('#ex-results').innerHTML='<div class="note">Scrivi per cercare.</div>';$('#ex-q').focus();})
     .catch(()=>$('#ex-results').innerHTML='<div class="note">⚠️ Libreria non raggiungibile (serve connessione). Aggiungi l\'esercizio a mano.</div>');
 }
@@ -515,36 +601,40 @@ function searchEx(){
   $('#ex-results').innerHTML=hits.length?hits.map(e=>
     `<div class="exhit" onclick='pickEx(${JSON.stringify(e.id)})'>
       <img loading="lazy" src="${EXIMG+(e.images[0]||'')}" alt="" onerror="this.style.visibility='hidden'">
-      <div><div class="n">${esc(e.name)}</div><div class="m">${esc((e.primaryMuscles||[]).join(', '))} · ${esc(e.equipment||'')}</div></div>
+      <div><div class="n">${esc(e.name)}</div><div class="m">${esc((e.primaryMuscles||[]).map(m=>itMap(IT_MUSC,m)).join(', '))}${e.equipment?' · '+esc(e.equipment):''}</div></div>
       <span class="chev">▸</span>
     </div>`).join(''):'<div class="note">Nessun risultato: prova in inglese (es. "bench press").</div>';
 }
 function pickEx(id){
   const e=EXDB.find(x=>x.id===id); if(!e)return;
   openSheet(exDetailHTML(e)+`
-    <div class="grid3" style="margin-top:14px">
-      <div><span class="mini">Serie</span><input type="number" id="pk-s" value="4" inputmode="numeric"></div>
-      <div><span class="mini">Reps</span><input type="number" id="pk-r" value="8" inputmode="numeric"></div>
+    <div class="grid2" style="margin-top:14px">
+      <div><span class="mini">Ripetizioni (schema)</span><input type="text" id="pk-r" value="4x8" placeholder="es. 12-10-8-8"></div>
       <div><span class="mini">Rec. (s)</span><input type="number" id="pk-w" value="90" inputmode="numeric"></div>
     </div>
+    <input type="text" id="pk-note" placeholder="Nota (facoltativa, es. ultima serie in stripping)" style="margin-top:8px">
     <button class="btn" onclick='confirmPickEx(${JSON.stringify(e.id)})'>Aggiungi alla scheda</button>
     <button class="btn ghost" onclick="openExSearch(exTargetScheda)">← Torna alla ricerca</button>`);
-  startExAnim(e);
+  startExAnim(e); translateEx(e);
 }
 function confirmPickEx(id){
   const e=EXDB.find(x=>x.id===id);
   const sch=DB.schede.find(s=>s.id===exTargetScheda); if(!sch)return;
-  sch.esercizi.push({nome:e.name,dbId:e.id,
-    sets:parseInt($('#pk-s').value)||4,reps:parseInt($('#pk-r').value)||8,rest:parseInt($('#pk-w').value)||90});
+  const scheme=parseScheme($('#pk-r').value)||[8,8,8,8];
+  sch.esercizi.push({nome:e.name,dbId:e.id,scheme,
+    sets:scheme.length,reps:firstRep(scheme),rest:parseInt($('#pk-w').value)||90,note:($('#pk-note').value||'').trim()});
   save(); closeSheet(); renderGym(); toast(e.name+' aggiunto ✓');
   document.querySelector(`details[data-id="${exTargetScheda}"]`)?.setAttribute('open','');
 }
 function exDetailHTML(e){
-  const instr=(e.instructions||[]).slice(0,6).map(i=>'<li style="margin-bottom:6px">'+esc(i)+'</li>').join('');
-  const imgs=(e.images||[]);
-  const two=imgs.length>1;
+  const imgs=(e.images||[]); const two=imgs.length>1;
+  const meta=[(e.primaryMuscles||[]).map(m=>itMap(IT_MUSC,m)).join(', '),itMap(IT_LEVEL,e.level),itMap(IT_EQUIP,e.equipment)].filter(Boolean).join(' · ');
+  const cached=DB.exTrans&&DB.exTrans[e.id];
+  const steps=((cached&&cached.length)?cached:(e.instructions||[])).slice(0,8);
+  const hasEng=(e.instructions||[]).length;
+  const status=cached?'🇮🇹 in italiano':(hasEng?(DB.settings.gemKey?'traduco in italiano…':'in inglese · attiva l\'AI in Admin'):'');
   return `<h3>${esc(e.name)}</h3>
-    <div class="note" style="text-transform:capitalize">${esc((e.primaryMuscles||[]).join(', '))} · ${esc(e.level||'')} · ${esc(e.equipment||'')}</div>
+    <div class="note" style="text-transform:capitalize">${esc(meta)}</div>
     <div class="exview" id="ex-view">
       <div class="exview-skel"></div>
       ${imgs.map((p,i)=>`<img class="exframe" data-i="${i}" src="${EXIMG+p}" alt="Posizione ${i+1}" onload="exViewLoaded()" onerror="exViewLoaded()">`).join('')}
@@ -552,7 +642,27 @@ function exDetailHTML(e){
     </div>
     ${two?'<div class="note" style="margin-top:6px">Illustrazione animata dell\'esecuzione (inizio → fine).</div>':''}
     <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(e.name+' esecuzione tutorial')}"><span>▶</span> Guarda i video su YouTube</a>
-    ${instr?'<label class="f" style="margin-top:14px">Esecuzione</label><ol style="padding-left:18px;font-size:.85rem;line-height:1.5;color:#44403C">'+instr+'</ol>':''}`;
+    ${steps.length?`<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:14px;gap:10px">
+      <label class="f" style="margin:0">Esecuzione</label>
+      <span class="note" id="ex-trans-status" style="margin:0;text-align:right">${status}</span></div>
+      <div id="ex-instr">${instrOL(steps)}</div>`:''}
+    <div class="note" style="opacity:.65;margin-top:12px">Illustrazione: Everkinetic · CC BY-SA 4.0</div>`;
+}
+// Traduce in italiano le istruzioni (una tantum, poi in cache) usando Gemini
+async function translateEx(e){
+  if(!e||!(e.instructions||[]).length)return;
+  if(DB.exTrans&&DB.exTrans[e.id]&&DB.exTrans[e.id].length)return; // già tradotto
+  if(!DB.settings.gemKey)return;
+  try{
+    const prompt=`Traduci in italiano queste istruzioni dell'esercizio "${e.name}", chiare e pratiche. Rispondi SOLO con i passaggi tradotti, uno per riga, senza numeri né trattini né elenco puntato:\n`+e.instructions.join('\n');
+    const t=await geminiOnce(prompt);
+    const steps=t.split('\n').map(s=>s.replace(/^\s*[\d.)\-•–]+\s*/,'').trim()).filter(Boolean).slice(0,8);
+    if(steps.length){
+      DB.exTrans=DB.exTrans||{}; DB.exTrans[e.id]=steps; save();
+      const box=$('#ex-instr'); if(box)box.innerHTML=instrOL(steps);
+      const st=$('#ex-trans-status'); if(st)st.textContent='🇮🇹 in italiano';
+    }
+  }catch(_){ const st=$('#ex-trans-status'); if(st)st.textContent='in inglese (traduzione non riuscita)'; }
 }
 let exAnimT=null;
 function exViewLoaded(){const v=$('#ex-view');if(v)v.classList.add('loaded');}
@@ -572,7 +682,7 @@ async function openExDetailByName(name,dbId){
   try{
     await loadEXDB();
     const e=dbId?EXDB.find(x=>x.id===dbId):EXDB.find(x=>x.name.toLowerCase()===name.toLowerCase());
-    if(e){openSheet(exDetailHTML(e));startExAnim(e);return;}
+    if(e){openSheet(exDetailHTML(e));startExAnim(e);translateEx(e);return;}
   }catch(_){}
   openSheet(`<h3>${esc(name)}</h3>
     <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(name+' esecuzione tutorial')}"><span>▶</span> Guarda i video su YouTube</a>`);
@@ -906,7 +1016,7 @@ function buildContext(){
   if(DB.sessions.length){
     c+='\nULTIMI ALLENAMENTI:\n';
     [...DB.sessions].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).forEach(s=>{
-      const det=s.entries.map(e=>e.esercizio+' '+entrySets(e).map(x=>x.p+'kg×'+x.r).join('/')).join('; ');
+      const det=s.entries.map(e=>e.esercizio+' '+entrySets(e).map(x=>x.p+'kg×'+x.r+(x.rpe?'@RPE'+x.rpe:'')).join('/')).join('; ');
       c+=`- ${s.date}: ${det}\n`;
     });
   }

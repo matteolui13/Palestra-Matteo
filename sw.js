@@ -1,5 +1,5 @@
 /* FIT·LOG service worker — app shell offline + cache runtime per libreria esercizi */
-const CACHE = 'fitlog-v2';
+const CACHE = 'fitlog-v3';
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
   './css/style.css', './js/app.js', './js/data-diet.js', './js/chart.umd.min.js',
