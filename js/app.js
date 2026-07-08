@@ -7,20 +7,28 @@
 const KEY='fitlog-v2';
 let DB=null;
 
+// Scansioni InBody reali (dall'Excel del 2026-05). bf = % grasso; fatkg = grasso in kg; bmr = metabolismo basale (kcal).
+const INBODY_SCANS=[
+  {date:'2025-08-29',peso:63.5,smm:29.0,bf:18.0,aec:0.378,visc:4,fatkg:11.4,bmr:1495,score:null,note:'Prima scansione'},
+  {date:'2025-10-03',peso:66.5,smm:30.7,bf:17.6,aec:0.373,visc:4,fatkg:11.7,bmr:1553,score:null,note:''},
+  {date:'2025-11-07',peso:67.4,smm:31.1,bf:17.9,aec:0.372,visc:4,fatkg:12.1,bmr:1565,score:null,note:''},
+  {date:'2025-12-01',peso:67.6,smm:31.8,bf:17.1,aec:0.368,visc:4,fatkg:11.5,bmr:1581,score:75,note:'Target 70.5 kg · +3.9 kg muscolo, −1.0 kg grasso'},
+  {date:'2026-01-14',peso:67.7,smm:31.6,bf:17.7,aec:0.366,visc:4,fatkg:12.0,bmr:1573,score:null,note:''},
+  {date:'2026-02-17',peso:69.4,smm:32.6,bf:17.1,aec:0.368,visc:4,fatkg:11.9,bmr:1613,score:null,note:'Inizio dieta Cut'},
+  {date:'2026-04-14',peso:68.7,smm:31.5,bf:18.8,aec:0.369,visc:5,fatkg:12.9,bmr:1575,score:null,note:''},
+  {date:'2026-05-12',peso:67.7,smm:30.6,bf:20.1,aec:0.368,visc:5,fatkg:13.6,bmr:1539,score:null,note:''}
+];
+const DATA_VERSION=4; // bumpalo se aggiungi altre scansioni/dieta canoniche da propagare agli utenti esistenti
+const GEM_MODEL_DEFAULT='gemini-3-flash-preview';
 function seed(){
   return {
-    scans:[
-      {id:1,date:'2025-08-29',peso:63.5,smm:29.0,bf:18.0,aec:0.378,score:null,visc:null,note:'Prima scansione'},
-      {id:2,date:'2025-10-03',peso:66.5,smm:30.7,bf:17.6,aec:0.373,score:null,visc:null,note:''},
-      {id:3,date:'2025-11-07',peso:67.4,smm:31.1,bf:17.9,aec:0.372,score:null,visc:null,note:''},
-      {id:4,date:'2025-12-01',peso:67.6,smm:31.8,bf:17.1,aec:0.368,score:75,visc:4,note:'Target 70.5 kg · +3.9 kg muscolo, −1.0 kg grasso'}
-    ],
+    scans: INBODY_SCANS.map((s,i)=>({id:i+1,...s})),
     schede:[], sessions:[],
     diet: JSON.parse(JSON.stringify(DIET_SEED)),
     mealTimes: {...MEAL_TIMES_DEFAULT},
     diary:{}, // '2026-07-06': { col:{st:'ok',kcal:426,note:''} }
-    settings:{giorno1:1, notif:false, gemKey:'', gemModel:'gemini-2.5-flash', gemCtx:true},
-    chat:[], notified:{}
+    settings:{giorno1:1, notif:false, gemKey:'', gemModel:GEM_MODEL_DEFAULT, gemCtx:true},
+    chat:[], notified:{}, dataVersion:DATA_VERSION
   };
 }
 function loadDB(){
@@ -36,6 +44,23 @@ function loadDB(){
       e.sets=m?parseInt(m[1]):3; e.reps=m?parseInt(m[2]):10; e.rest=e.rest||90;
     }
   }));
+  // migrazione campi InBody extra (grasso in kg + metabolismo basale)
+  DB.scans.forEach(s=>{ if(s.fatkg===undefined)s.fatkg=null; if(s.bmr===undefined)s.bmr=null; });
+  // migrazione dati reali (una tantum, non distruttiva sulle date già presenti):
+  // aggiunge le scansioni InBody mancanti e passa al piano dieta CUT attuale.
+  // ogni blocco è gated sulla sua versione così non si ri-applica agli utenti già migrati
+  if((DB.dataVersion||0) < 3){ // scansioni InBody aggiornate + passaggio al piano CUT
+    INBODY_SCANS.forEach(cs=>{
+      const ex=DB.scans.find(s=>s.date===cs.date);
+      if(!ex){ DB.scans.push({...cs,id:uid()}); }
+      else { if(ex.fatkg==null)ex.fatkg=cs.fatkg; if(ex.bmr==null)ex.bmr=cs.bmr; } // riempi solo i campi mancanti, non sovrascrive i tuoi dati
+    });
+    DB.diet = JSON.parse(JSON.stringify(DIET_SEED));
+  }
+  if((DB.dataVersion||0) < 4){ // modello AI di default → Gemini 3 Flash
+    if(!DB.settings.gemModel || DB.settings.gemModel==='gemini-2.5-flash') DB.settings.gemModel=GEM_MODEL_DEFAULT;
+  }
+  if((DB.dataVersion||0) < DATA_VERSION) DB.dataVersion=DATA_VERSION;
   persist();
 }
 function persist(){try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){toast('⚠️ Salvataggio non riuscito');}}
@@ -124,7 +149,7 @@ function renderHome(){
     stat('Grasso',last.bf,'%',last.bf-first.bf,true)):'';
 
   if(homeChart)homeChart.destroy();
-  homeChart=new Chart($('#chart-home'),{type:'line',
+  homeChart=safeChart('#chart-home',{type:'line',
     data:{labels:sc.map(s=>fmtD(s.date)),datasets:[{data:sc.map(s=>s.peso)}]},options:lineOpts('kg')});
 }
 function mealVerb(id){return {col:'fatto colazione',pra:'pranzato',cen:'cenato'}[id]||'mangiato';}
@@ -331,6 +356,7 @@ function renderPlayer(){
         <div><span class="mini">Peso kg</span><input type="number" step="0.5" inputmode="decimal" id="pl-p" value="${sugg}"></div>
         <div><span class="mini">Reps</span><input type="number" inputmode="numeric" id="pl-r" value="${ex.reps}"></div>
       </div>
+      ${DB.settings.gemKey?`<button class="btn small ghost" style="max-width:300px;margin:12px auto 0" onclick="suggestWeight()">✦ Peso consigliato dall'AI</button><div id="pl-ai"></div>`:''}
       <button class="btn pl-done" onclick="completeSet()">✓ Serie completata</button>
       ${done.length?`<div class="pl-log">${done.map((s,i)=>`<span class="pill g">S${i+1}: ${s.p}kg×${s.r}</span>`).join(' ')}</div>`:''}
       <div style="display:flex;gap:10px;margin-top:18px">
@@ -455,7 +481,7 @@ function renderProgChart(){
     .sort((a,b)=>a.date.localeCompare(b.date))
     .map(s=>({d:fmtD(s.date),v:Math.max(...s.entries.filter(e=>e.esercizio===ex).flatMap(e=>entrySets(e).map(x=>x.p||0)))}));
   if(progChart)progChart.destroy();
-  progChart=new Chart($('#chart-prog'),{type:'line',
+  progChart=safeChart('#chart-prog',{type:'line',
     data:{labels:pts.map(p=>p.d),datasets:[{data:pts.map(p=>p.v)}]},options:lineOpts('kg')});
 }
 
@@ -488,8 +514,9 @@ function searchEx(){
   const hits=EXDB.filter(e=>terms.some(t=>e.name.toLowerCase().includes(t))).slice(0,20);
   $('#ex-results').innerHTML=hits.length?hits.map(e=>
     `<div class="exhit" onclick='pickEx(${JSON.stringify(e.id)})'>
-      <img loading="lazy" src="${EXIMG+e.images[0]}" alt="">
+      <img loading="lazy" src="${EXIMG+(e.images[0]||'')}" alt="" onerror="this.style.visibility='hidden'">
       <div><div class="n">${esc(e.name)}</div><div class="m">${esc((e.primaryMuscles||[]).join(', '))} · ${esc(e.equipment||'')}</div></div>
+      <span class="chev">▸</span>
     </div>`).join(''):'<div class="note">Nessun risultato: prova in inglese (es. "bench press").</div>';
 }
 function pickEx(id){
@@ -513,22 +540,32 @@ function confirmPickEx(id){
   document.querySelector(`details[data-id="${exTargetScheda}"]`)?.setAttribute('open','');
 }
 function exDetailHTML(e){
-  const instr=(e.instructions||[]).slice(0,5).map(i=>'<li style="margin-bottom:6px">'+esc(i)+'</li>').join('');
+  const instr=(e.instructions||[]).slice(0,6).map(i=>'<li style="margin-bottom:6px">'+esc(i)+'</li>').join('');
+  const imgs=(e.images||[]);
+  const two=imgs.length>1;
   return `<h3>${esc(e.name)}</h3>
     <div class="note" style="text-transform:capitalize">${esc((e.primaryMuscles||[]).join(', '))} · ${esc(e.level||'')} · ${esc(e.equipment||'')}</div>
-    <div class="exdetail"><img id="ex-anim" src="${EXIMG+e.images[0]}" alt="Esecuzione"></div>
+    <div class="exview" id="ex-view">
+      <div class="exview-skel"></div>
+      ${imgs.map((p,i)=>`<img class="exframe" data-i="${i}" src="${EXIMG+p}" alt="Posizione ${i+1}" onload="exViewLoaded()" onerror="exViewLoaded()">`).join('')}
+      ${two?'<div class="exview-badge" id="ex-frame-lbl">Posizione 1 · inizio</div><div class="exview-dots"><span class="on"></span><span></span></div>':''}
+    </div>
+    ${two?'<div class="note" style="margin-top:6px">Illustrazione animata dell\'esecuzione (inizio → fine).</div>':''}
     <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(e.name+' esecuzione tutorial')}"><span>▶</span> Guarda i video su YouTube</a>
     ${instr?'<label class="f" style="margin-top:14px">Esecuzione</label><ol style="padding-left:18px;font-size:.85rem;line-height:1.5;color:#44403C">'+instr+'</ol>':''}`;
 }
 let exAnimT=null;
-function startExAnim(e){ // alterna le 2 immagini → mini animazione dell'esecuzione
+function exViewLoaded(){const v=$('#ex-view');if(v)v.classList.add('loaded');}
+function startExAnim(e){ // crossfade fra le 2 pose → mini animazione dell'esecuzione
   clearTimeout(exAnimT);
   if(!e.images||e.images.length<2)return;
-  let i=0;
   (function loop(){
-    const img=$('#ex-anim'); if(!img)return;
-    i=1-i; img.src=EXIMG+e.images[i];
-    exAnimT=setTimeout(loop,900);
+    const v=$('#ex-view'); if(!v)return;
+    const on=v.classList.toggle('show1');
+    const dots=v.querySelectorAll('.exview-dots span');
+    if(dots.length){dots[0].classList.toggle('on',!on);dots[1].classList.toggle('on',on);}
+    const lbl=$('#ex-frame-lbl'); if(lbl)lbl.textContent=on?'Posizione 2 · fine':'Posizione 1 · inizio';
+    exAnimT=setTimeout(loop,1200);
   })();
 }
 async function openExDetailByName(name,dbId){
@@ -544,42 +581,200 @@ async function openExDetailByName(name,dbId){
 /* ================================================================
    CORPO
    ================================================================ */
-Chart.defaults.font.family='Inter'; Chart.defaults.color='#857F74';
+// Se Chart.js non è disponibile (offline/CDN giù), l'app deve comunque funzionare:
+// questa riga non deve mai interrompere il caricamento dello script.
+if(typeof Chart!=='undefined'){Chart.defaults.font.family='Inter'; Chart.defaults.color='#857F74';}
+// Crea un grafico solo se Chart c'è e il canvas esiste; altrimenti non fa nulla (nessun crash).
+function safeChart(sel,cfg){const cv=$(sel); if(!cv||typeof Chart==='undefined')return null; try{return new Chart(cv,cfg);}catch(_){return null;}}
 const lineOpts=unit=>({responsive:true,maintainAspectRatio:false,
   plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y+(unit?' '+unit:'')}}},
   scales:{x:{grid:{display:false}},y:{grid:{color:'#EFEBE0'},ticks:{precision:1}}},
   elements:{line:{tension:.3,borderWidth:2.5,borderColor:'#8E241E'},
             point:{radius:4,backgroundColor:'#8E241E',borderColor:'#fff',borderWidth:2}}});
 let bodyChart=null, metric='peso';
-const METRICS={peso:'kg',smm:'kg',bf:'%',aec:''};
-function setMetric(m,el){metric=m;$$('#metric-chips .chip').forEach(x=>x.classList.remove('on'));el.classList.add('on');renderBodyChart();}
+const METRICS={peso:'kg',smm:'kg',bf:'%',fatkg:'kg',aec:'',bmr:'kcal'};
+const METRIC_LABELS={peso:'Peso',smm:'Muscolo',bf:'% Grasso',fatkg:'Grasso kg',aec:'AEC',bmr:'Basale'};
+const METRIC_INV={peso:false,smm:false,bf:true,fatkg:true,aec:true,bmr:false}; // inv=true → in calo è positivo (verde)
+const METRIC_DEC={peso:1,smm:1,bf:1,fatkg:1,aec:3,bmr:0};
+const DASH_KEYS=['peso','smm','bf','fatkg','aec','bmr'];
+function fmtN(v,k){return v==null?'–':(+v).toFixed(METRIC_DEC[k]);}
+function deltaCls(d,k){ if(d==null||d===0)return 'flat'; return ((d>0)!==METRIC_INV[k])?'up':'down'; }
+function deltaHTML(d,k,suffix){ if(d==null)return ''; const a=d>0?'▲':d<0?'▼':'■'; const s=(d>0?'+':'')+(+d).toFixed(METRIC_DEC[k]); return `<span class="delta ${deltaCls(d,k)}">${a} ${s}${suffix||''}</span>`; }
+
+function setMetric(m){ metric=m; renderDashboard(); renderBodyChart(); }
 function renderCorpo(){
   $('#sc-date').value=today();
-  renderBodyChart(); renderScanList(); renderBFRange();
+  renderSummary(); renderComposition(); renderDashboard(); renderBodyChart(); renderGauges(); renderDietVsWeight(); renderScanList();
+}
+function renderSummary(){
+  const sc=sortedScans(); const box=$('#corpo-summary'); if(!box)return;
+  if(!sc.length){box.innerHTML='<span class="note">Nessuna scansione.</span>';return;}
+  const last=sc[sc.length-1], prev=sc.length>1?sc[sc.length-2]:null, first=sc[0];
+  const tile=k=>{
+    const v=last[k]; if(v==null)return '';
+    const dp=prev&&prev[k]!=null?+(v-prev[k]).toFixed(3):null;
+    const df=first[k]!=null&&first!==last?+(v-first[k]).toFixed(3):null;
+    return `<div class="stat"><div class="lbl">${METRIC_LABELS[k]}</div>
+      <div class="val">${fmtN(v,k)}<small> ${METRICS[k]}</small></div>
+      ${dp!=null?`<div class="delta ${deltaCls(dp,k)}">${dp>0?'▲':dp<0?'▼':'■'} ${(dp>0?'+':'')+fmtN(dp,k)} vs scorsa</div>`:''}
+      ${df!=null?`<div class="delta flat" style="opacity:.7">${(df>0?'+':'')+fmtN(df,k)} dall'inizio</div>`:''}</div>`;
+  };
+  box.innerHTML=`<div class="rlabel">Ultima analisi · ${fmtD(last.date)}${last.note?' · '+esc(last.note):''}</div>
+    <div class="grid3" style="margin-top:10px">${tile('peso')}${tile('smm')}${tile('bf')}</div>
+    <button class="btn ghost small" style="width:100%;margin-top:12px" onclick="analyzeBody()">✦ Analizza i miei progressi con l'AI</button>`;
+}
+function renderComposition(){
+  const box=$('#corpo-composition'); if(!box)return;
+  const last=[...sortedScans()].reverse().find(s=>s.peso!=null&&s.fatkg!=null);
+  if(!last){box.innerHTML='';return;}
+  const peso=last.peso, grasso=last.fatkg, magra=+(peso-grasso).toFixed(1);
+  const musc=last.smm||0, resto=+(magra-musc).toFixed(1);
+  const pc=v=>Math.max(0,v)/peso*100;
+  const seg=(v,col)=>`<div class="seg" style="width:${pc(v)}%;background:${col}">${pc(v)>13?`<span>${v}</span>`:''}</div>`;
+  box.innerHTML=`<div class="rlabel">Composizione corporea · ${peso} kg</div>
+    <div class="compbar">${seg(musc,'#8E241E')}${seg(resto,'#1B8A55')}${seg(grasso,'#B4552D')}</div>
+    <div class="complegend">
+      <span><i style="background:#8E241E"></i>Muscolo <b>${musc}</b> kg</span>
+      <span><i style="background:#1B8A55"></i>Resto magra <b>${resto}</b> kg</span>
+      <span><i style="background:#B4552D"></i>Grasso <b>${grasso}</b> kg · ${last.bf}%</span>
+    </div>
+    <div class="note">Massa magra ${magra} kg (di cui muscolo scheletrico ${musc} kg) · Massa grassa ${grasso} kg.</div>`;
+}
+function sparkline(vals,active){
+  const clean=vals.filter(v=>v!=null);
+  if(clean.length<2)return '<svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"></svg>';
+  const min=Math.min(...clean),max=Math.max(...clean),rng=(max-min)||1,n=clean.length;
+  const pts=clean.map((v,i)=>[i/(n-1)*100, 23-((v-min)/rng)*20]);
+  const d=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  const col=active?'#8E241E':'#C3B4AB';
+  return `<svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none">
+    <path d="${d}" fill="none" stroke="${col}" stroke-width="${active?2.4:1.6}" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function renderDashboard(){
+  const box=$('#corpo-dashboard'); if(!box)return;
+  const sc=sortedScans();
+  box.innerHTML='<div class="dashgrid">'+DASH_KEYS.map(k=>{
+    const series=sc.map(s=>s[k]);
+    const clean=series.filter(v=>v!=null);
+    const last=clean[clean.length-1], prev=clean.length>1?clean[clean.length-2]:null;
+    const d=(last!=null&&prev!=null)?+(last-prev).toFixed(3):null;
+    return `<button class="dashcard${k===metric?' sel':''}" onclick="setMetric('${k}')" aria-pressed="${k===metric}">
+      <div class="lbl">${METRIC_LABELS[k]}</div>
+      <div class="dv">${fmtN(last,k)}<small>${METRICS[k]?' '+METRICS[k]:''}</small></div>
+      ${d!=null?deltaHTML(d,k):'<span class="delta flat">—</span>'}
+      ${sparkline(series,k===metric)}</button>`;
+  }).join('')+'</div>';
 }
 function renderBodyChart(){
   const sc=sortedScans();
   if(bodyChart)bodyChart.destroy();
-  bodyChart=new Chart($('#chart-body'),{type:'line',
-    data:{labels:sc.map(s=>fmtD(s.date)),datasets:[{data:sc.map(s=>s[metric])}]},options:lineOpts(METRICS[metric])});
+  const opts=lineOpts(METRICS[metric]);
+  if(metric==='peso')opts.scales.y.suggestedMax=71; // così la linea target 70.5 resta visibile
+  if(metric==='aec')opts.scales.y.ticks.precision=3;
+  // banda/linea di riferimento disegnata sotto ai dati (nessun plugin esterno)
+  const refPlugin={id:'corpoRef',beforeDatasetsDraw(chart){
+    const {ctx,chartArea:ca,scales:{y}}=chart; if(!ca)return; ctx.save();
+    if(metric==='bf'){ const y1=y.getPixelForValue(20),y2=y.getPixelForValue(10);
+      ctx.fillStyle='rgba(27,138,85,.10)'; ctx.fillRect(ca.left,y1,ca.right-ca.left,y2-y1);
+      ctx.fillStyle='rgba(27,138,85,.6)'; ctx.font='10px Inter'; ctx.fillText('range sano 10–20%',ca.left+6,y1+13);
+    } else if(metric==='peso'){ const yt=y.getPixelForValue(70.5);
+      ctx.strokeStyle='rgba(142,36,30,.55)'; ctx.setLineDash([5,4]); ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(ca.left,yt); ctx.lineTo(ca.right,yt); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle='rgba(142,36,30,.7)'; ctx.font='10px Inter'; ctx.fillText('target 70.5',ca.right-64,yt-5);
+    }
+    ctx.restore();
+  }};
+  bodyChart=safeChart('#chart-body',{type:'line',
+    data:{labels:sc.map(s=>fmtD(s.date)),datasets:[{data:sc.map(s=>s[metric]),label:METRIC_LABELS[metric],spanGaps:true}]},
+    options:opts, plugins:[refPlugin]});
 }
-function renderBFRange(){
-  const sc=sortedScans(),last=sc[sc.length-1];
-  if(!last||last.bf==null){$('#bf-range-card').innerHTML='';return;}
-  const min=5,max=30,pos=Math.min(97,Math.max(3,(last.bf-min)/(max-min)*100));
-  $('#bf-range-card').innerHTML=`<div class="lbl" style="font-family:'Barlow Condensed';font-weight:600;text-transform:uppercase;letter-spacing:.06em;font-size:.78rem;color:var(--muted)">% Grasso — range normale 10–20%</div>
-    <div class="val" style="font-size:1.5rem;font-weight:700">${last.bf}<small style="font-size:.8rem;color:var(--muted)"> %</small></div>
-    <div class="rangebar"><div class="track"><div class="dot" style="left:${pos}%"></div></div>
-    <div class="ends"><span>5</span><span>10</span><span>20</span><span>30</span></div></div>`;
+function renderGauges(){
+  const box=$('#corpo-gauges'); if(!box)return;
+  const last=[...sortedScans()].reverse().find(s=>s.bf!=null||s.aec!=null||s.visc!=null);
+  if(!last){box.innerHTML='';return;}
+  const parts=[];
+  if(last.bf!=null)  parts.push(gauge('% Grasso corporeo','range sano 10–20%',last.bf,'%',5,30,10,20));
+  if(last.aec!=null) parts.push(gauge('Rapporto AEC — idratazione','equilibrato ≤ 0.380',last.aec,'',0.360,0.400,0.360,0.380));
+  if(last.visc!=null)parts.push(gauge('Grasso viscerale','sano sotto 10',last.visc,'',1,20,1,9));
+  box.innerHTML=parts.join('<div style="height:16px"></div>')||'<span class="note">Dati non disponibili.</span>';
+}
+function gauge(label,sub,val,unit,min,max,nlo,nhi){
+  const pos=Math.min(97,Math.max(3,(val-min)/(max-min)*100));
+  const gl=Math.max(0,(nlo-min)/(max-min)*100), gh=Math.min(100,(nhi-min)/(max-min)*100);
+  const ok=val>=nlo&&val<=nhi;
+  const bg=`linear-gradient(90deg,#E9E4D8 0 ${gl}%,var(--green-soft) ${gl}% ${gh}%,#F3DED7 ${gh}% 100%)`;
+  return `<div><div class="rlabel" style="margin:0">${label}
+      <span class="pill ${ok?'g':'r'}" style="margin-left:8px">${ok?'nella norma':'fuori norma'}</span></div>
+    <div class="val" style="font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px">${val}<small style="font-size:.8rem;color:var(--muted)"> ${unit}</small></div>
+    <div class="rangebar"><div class="track" style="background:${bg}"><div class="dot" style="left:${pos}%"></div></div>
+    <div class="ends">${[...new Set([min,nlo,nhi,max])].map(e=>'<span>'+e+'</span>').join('')}</div></div>
+    <div class="note" style="margin-top:5px">${sub}</div></div>`;
+}
+
+/* ---------------- DIETA vs PESO (small multiples, stesso asse tempo) ---------------- */
+let kcalChart=null, pesoDvChart=null, dvpWin=90; // giorni finestra; 0 = tutto
+const fmtISO=dt=>dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+function dietDayForStr(ds){const[y,m,d]=ds.split('-').map(Number);return dietDayFor(new Date(y,m-1,d));}
+function setDvWin(w){dvpWin=w;renderDietVsWeight();}
+function dvpDays(){
+  const end=new Date(), endD=new Date(end.getFullYear(),end.getMonth(),end.getDate());
+  let start;
+  if(dvpWin===0){const f=sortedScans()[0]; const[y,m,d]=(f?f.date:today()).split('-').map(Number); start=new Date(y,m-1,d);}
+  else {start=new Date(endD); start.setDate(endD.getDate()-dvpWin+1);}
+  const days=[]; for(let d=new Date(start); d<=endD; d.setDate(d.getDate()+1)) days.push(fmtISO(d));
+  return days;
+}
+function renderDietVsWeight(){
+  const chips=$('#dvp-chips');
+  if(chips)chips.innerHTML=[[30,'30 giorni'],[90,'90 giorni'],[0,'Tutto']].map(([w,l])=>
+    `<button class="chip ${dvpWin===w?'on':''}" onclick="setDvWin(${w})">${l}</button>`).join('');
+  const days=dvpDays(), labels=days.map(fmtD);
+  const eaten=[], plan=[], peso=[];
+  days.forEach(ds=>{
+    const meals=mealsOfDay(dietDayForStr(ds)), log=DB.diary[ds]||{};
+    plan.push(meals.reduce((a,m)=>a+m.kcal,0));
+    if(Object.keys(log).length){
+      let e=0; meals.forEach(m=>{const l=log[m.id]; if(l){ if(l.st==='ok')e+=m.kcal; else if(l.st==='other')e+=(+l.kcal||0);}});
+      eaten.push(e);
+    } else eaten.push(null);
+    const s=DB.scans.find(x=>x.date===ds); peso.push(s?s.peso:null);
+  });
+  const xopt={grid:{display:false},ticks:{autoSkip:true,maxTicksLimit:6,maxRotation:0}};
+  if(kcalChart)kcalChart.destroy();
+  kcalChart=safeChart('#chart-kcal',{type:'line',
+    data:{labels,datasets:[
+      {label:'Piano',data:plan,borderColor:'#C3B4AB',borderDash:[5,4],borderWidth:1.5,pointRadius:0,tension:.2},
+      {label:'Assunte',data:eaten,borderColor:'#8E241E',borderWidth:2.5,pointRadius:3,pointBackgroundColor:'#8E241E',pointBorderColor:'#fff',pointBorderWidth:1.5,spanGaps:false,tension:.2}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:true,position:'bottom',labels:{boxWidth:12,boxHeight:2,font:{size:11}}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+': '+(c.parsed.y==null?'—':c.parsed.y+' kcal')}}},
+      scales:{x:xopt,y:{grid:{color:'#EFEBE0'},ticks:{precision:0}}}}});
+  const ws=DB.scans.map(s=>s.peso).filter(v=>v!=null);
+  const yMin=ws.length?Math.floor(Math.min(...ws)-2):undefined, yMax=ws.length?Math.ceil(Math.max(...ws)+2):undefined;
+  const pesoInWin=peso.some(v=>v!=null);
+  if(pesoDvChart)pesoDvChart.destroy();
+  pesoDvChart=safeChart('#chart-peso-dv',{type:'line',
+    data:{labels,datasets:[{label:'Peso',data:peso,borderColor:'#8E241E',borderWidth:2.5,pointRadius:3,pointBackgroundColor:'#8E241E',pointBorderColor:'#fff',pointBorderWidth:1.5,spanGaps:true,tension:.3}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y==null?'—':c.parsed.y+' kg'}}},
+      scales:{x:xopt,y:{grid:{color:'#EFEBE0'},ticks:{precision:1},suggestedMin:yMin,suggestedMax:yMax}}}});
+  const note=$('#dvp-note');
+  if(note)note.textContent=!eaten.some(v=>v!=null)
+    ? 'Registra i pasti da Home o Dieta: qui vedrai le calorie assunte contro il piano, allineate al peso.'
+    : pesoInWin
+      ? 'Calorie assunte vs piano (sopra) e peso (sotto), allineati sullo stesso periodo.'
+      : 'Nessuna pesata in questo periodo: le scansioni InBody sono mensili — usa «Tutto» per vedere il trend del peso.';
 }
 function addScan(){
   const d=$('#sc-date').value,p=parseFloat($('#sc-peso').value);
   if(!d||!p){toast('Servono almeno data e peso');return;}
   DB.scans.push({id:uid(),date:d,peso:p,
     smm:parseFloat($('#sc-smm').value)||null, bf:parseFloat($('#sc-bf').value)||null,
+    fatkg:parseFloat($('#sc-fatkg').value)||null, bmr:parseInt($('#sc-bmr').value)||null,
     aec:parseFloat($('#sc-aec').value)||null, score:parseInt($('#sc-score').value)||null,
     visc:parseInt($('#sc-visc').value)||null, note:$('#sc-note').value.trim()});
-  ['#sc-peso','#sc-smm','#sc-bf','#sc-aec','#sc-score','#sc-visc','#sc-note'].forEach(s=>$(s).value='');
+  ['#sc-peso','#sc-smm','#sc-bf','#sc-fatkg','#sc-bmr','#sc-aec','#sc-score','#sc-visc','#sc-note'].forEach(s=>$(s).value='');
   save(); haptic(); toast('Scansione salvata ✓'); renderCorpo();
 }
 function delScan(id){
@@ -590,7 +785,7 @@ function renderScanList(){
   const sc=sortedScans().reverse();
   $('#scan-list').innerHTML=sc.length?sc.map(s=>
     `<div class="row"><div><div class="t">${fmtD(s.date)} — ${s.peso} kg</div>
-    <div class="s">Muscolo ${s.smm??'–'} kg · Grasso ${s.bf??'–'}% · AEC ${s.aec??'–'}${s.score?' · Punteggio '+s.score:''}${s.visc?' · Viscerale '+s.visc:''}${s.note?'<br>'+esc(s.note):''}</div></div>
+    <div class="s">Muscolo ${s.smm??'–'} kg · Grasso ${s.bf??'–'}%${s.fatkg!=null?' ('+s.fatkg+' kg)':''} · AEC ${s.aec??'–'}${s.bmr?' · Basale '+s.bmr+' kcal':''}${s.score?' · Punteggio '+s.score:''}${s.visc?' · Viscerale '+s.visc:''}${s.note?'<br>'+esc(s.note):''}</div></div>
     <button class="x" onclick="delScan(${s.id})">✕</button></div>`).join(''):'<span class="note">Nessuna scansione.</span>';
 }
 
@@ -675,10 +870,16 @@ function importBackup(input){
    AI — Gemini
    ================================================================ */
 function openAIChat(){
+  const chips=DB.settings.gemKey?`<div class="chips" style="margin-top:10px">
+    <button class="chip" onclick="askQuick('Come sta andando la mia ricomposizione corporea? Guarda le scansioni InBody.')">Come va il fisico?</button>
+    <button class="chip" onclick="askQuick('Valuta la mia dieta di oggi e dimmi da nutrizionista cosa miglioreresti.')">Valuta la dieta</button>
+    <button class="chip" onclick="askQuick('In base agli ultimi allenamenti, come dovrei progredire con i carichi?')">Carichi</button>
+  </div>`:'';
   openSheet(`<h3>Assistente AI ✦</h3>
-    <div class="note">Interroga Gemini sui tuoi dati. Non sostituisce PT e nutrizionista. ${DB.settings.gemKey?'':'<b>Configura prima la API key in Admin → Gemini.</b>'}</div>
+    <div class="note">Il tuo PT e nutrizionista virtuale: ragiona sui tuoi dati reali (scansioni, dieta, allenamenti). Non sostituisce i professionisti. ${DB.settings.gemKey?'':'<b>Configura prima la API key in Admin → Gemini.</b>'}</div>
+    ${chips}
     <div class="chat" id="chat"></div>
-    <div class="askrow"><input type="text" id="ai-q" placeholder="es. Come va la ricomposizione?" onkeydown="if(event.key==='Enter')askAI()">
+    <div class="askrow"><input type="text" id="ai-q" placeholder="es. Sto perdendo muscolo?" onkeydown="if(event.key==='Enter')askAI()">
     <button onclick="askAI()" aria-label="Invia">➤</button></div>`);
   renderChat();
 }
@@ -689,8 +890,14 @@ function renderChat(){
 }
 function buildContext(){
   const sc=sortedScans(); const now=new Date(); const dd=dietDayFor(now);
-  let c='Sono Matteo, 25 anni, 179 cm, alleno dal 14/08/2025 con PT e nutrizionista. Target InBody: 70.5 kg (+3.9 kg muscolo, −1.0 kg grasso).\n\nSCANSIONI INBODY:\n';
-  sc.forEach(s=>c+=`- ${s.date}: ${s.peso}kg, muscolo ${s.smm??'-'}kg, grasso ${s.bf??'-'}%, AEC ${s.aec??'-'}\n`);
+  const last=sc[sc.length-1], first=sc[0];
+  let c='Agisci come il mio personal trainer e nutrizionista: pratico, diretto e motivante, in italiano. Basati SOLO sui dati qui sotto; se un dato manca, dillo invece di inventarlo. Niente diagnosi mediche.\n\n';
+  c+='PROFILO: Matteo, 25 anni, 179 cm, programmatore. Alleno dal 14/08/2025. Fase di CUT dal 17/02/2026, creatina dal 01/02/2026. Target storico InBody 70.5 kg.\n\nSCANSIONI INBODY (dalla più vecchia alla più recente):\n';
+  sc.forEach(s=>c+=`- ${s.date}: peso ${s.peso}kg, muscolo scheletrico ${s.smm??'-'}kg, grasso ${s.bf??'-'}% (${s.fatkg??'-'}kg), AEC ${s.aec??'-'}, viscerale ${s.visc??'-'}${s.bmr?', metab.basale '+s.bmr+'kcal':''}\n`);
+  if(last&&first&&last!==first){
+    const dv=(a,b,u)=>{const x=(a||0)-(b||0);return (x>=0?'+':'')+x.toFixed(1)+u;};
+    c+=`Variazione totale dall'inizio: peso ${dv(last.peso,first.peso,'kg')}, muscolo ${dv(last.smm,first.smm,'kg')}, grasso ${dv(last.bf,first.bf,'%')} (${dv(last.fatkg,first.fatkg,'kg')}).\n`;
+  }
   c+='\nDIETA DI OGGI (giorno '+dd+'):\n';
   mealsOfDay(dd).forEach(m=>c+=`- ${m.nome} ${m.ora}: ${itemsTxt(m.items)} (${m.kcal} kcal)\n`);
   const dl=DB.diary[today()]||{};
@@ -698,33 +905,63 @@ function buildContext(){
   if(done)c+='Registrato oggi: '+done+'\n';
   if(DB.sessions.length){
     c+='\nULTIMI ALLENAMENTI:\n';
-    [...DB.sessions].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).forEach(s=>
-      c+=`- ${s.date}: `+s.entries.map(e=>`${e.esercizio} ${e.peso}kg×${e.reps}`).join(', ')+'\n');
+    [...DB.sessions].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6).forEach(s=>{
+      const det=s.entries.map(e=>e.esercizio+' '+entrySets(e).map(x=>x.p+'kg×'+x.r).join('/')).join('; ');
+      c+=`- ${s.date}: ${det}\n`;
+    });
   }
-  c+='\nRispondi in italiano, conciso. Non sostituire PT/nutrizionista.';
+  c+='\nRispondi conciso (max ~8 righe) con consigli concreti.';
   return c;
+}
+// Chiamata singola all'API Gemini (riusata da chat, analisi progressi e peso consigliato)
+async function geminiCall(contents){
+  const res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(DB.settings.gemModel||GEM_MODEL_DEFAULT)+':generateContent?key='+encodeURIComponent(DB.settings.gemKey),{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({contents,generationConfig:{thinkingConfig:{thinkingLevel:'minimal'}}})});
+  const d=await res.json();
+  if(d.error)throw new Error(d.error.message||'Errore API');
+  return (d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim()||'(risposta vuota)';
+}
+function geminiOnce(prompt){ return geminiCall([{role:'user',parts:[{text:prompt}]}]); }
+function askQuick(q){ if(!$('#ai-q'))openAIChat(); const i=$('#ai-q'); if(i){i.value=q; askAI();} }
+function analyzeBody(){
+  if(!DB.settings.gemKey){openAIChat();toast('Configura la API key AI in Admin');return;}
+  askQuick('Analizza le mie ultime scansioni InBody: come sta andando il fisico in questa fase di cut? Cosa va bene, cosa dovrei aggiustare tra allenamento e dieta?');
 }
 async function askAI(){
   const q=$('#ai-q').value.trim(); if(!q)return;
   if(!DB.settings.gemKey){toast('Configura la API key in Admin');return;}
   $('#ai-q').value='';
   DB.chat.push({r:'me',t:q}); renderChat();
-  const c=$('#chat'); const th=document.createElement('div'); th.className='msg ai'; th.textContent='…'; c.appendChild(th);
+  const c=$('#chat'); const th=document.createElement('div'); th.className='msg ai'; th.textContent='…'; c.appendChild(th); $('#sheet').scrollTop=1e6;
   const contents=[];
   if(DB.settings.gemCtx)contents.push({role:'user',parts:[{text:buildContext()}]},{role:'model',parts:[{text:'Ok, ho i tuoi dati. Chiedimi pure.'}]});
   DB.chat.slice(-12).forEach(m=>contents.push({role:m.r==='me'?'user':'model',parts:[{text:m.t}]}));
   try{
-    const res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(DB.settings.gemModel)+':generateContent?key='+encodeURIComponent(DB.settings.gemKey),{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents})});
-    const d=await res.json(); th.remove();
-    if(d.error)throw new Error(d.error.message||'Errore API');
-    const t=(d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim()||'(risposta vuota)';
-    DB.chat.push({r:'ai',t});
+    const t=await geminiCall(contents); th.remove(); DB.chat.push({r:'ai',t});
   }catch(e){
-    th.remove();
-    DB.chat.push({r:'err',t:'Errore: '+e.message+'\nControlla API key e nome modello in Admin.'});
+    th.remove(); DB.chat.push({r:'err',t:'Errore: '+e.message+'\nControlla API key e nome modello in Admin.'});
   }
   save(); renderChat();
+}
+// Peso consigliato dall'AI durante l'allenamento
+async function suggestWeight(){
+  const ex=plExercise(); if(!ex)return;
+  if(!DB.settings.gemKey){toast('Configura la API key AI in Admin');return;}
+  const box=$('#pl-ai'); if(box)box.innerHTML='<div class="pl-ai-tip">✦ Calcolo il peso consigliato…</div>';
+  const hist=[];
+  [...DB.sessions].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,8).forEach(s=>{
+    const en=s.entries.find(x=>x.esercizio===ex.nome);
+    if(en)hist.push(s.date+': '+entrySets(en).map(x=>x.p+'kg×'+x.r).join(', '));
+  });
+  const prompt=`Sei il mio personal trainer. Esercizio: "${ex.nome}". Oggi: serie ${PL.setIdx+1} di ${ex.sets}, obiettivo ${ex.reps} ripetizioni. Sono in fase di cut.\nStorico recente di questo esercizio:\n${hist.join('\n')||'nessuno storico registrato'}\nSuggerisci il PESO di lavoro in kg per la prossima serie, con progressione graduale e sicura. Rispondi in UNA sola riga: "<numero> kg — <motivo breve>".`;
+  try{
+    const t=await geminiOnce(prompt);
+    const m=t.match(/(\d+(?:[.,]\d+)?)\s*kg/i);
+    const w=m?m[1].replace(',','.'):null;
+    if(box)box.innerHTML=`<div class="pl-ai-tip">✦ ${esc(t)}</div>`+
+      (w?`<button class="btn small soft" style="max-width:300px;margin:8px auto 0" onclick="var i=document.querySelector('#pl-p');if(i){i.value='${w}';haptic();toast('Peso impostato: ${w} kg');}">Usa ${w} kg</button>`:'');
+  }catch(e){ if(box)box.innerHTML='<div class="pl-ai-tip">Errore AI: '+esc(e.message)+'</div>'; }
 }
 
 /* ================================================================

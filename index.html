@@ -106,18 +106,24 @@
 <section id="tab-corpo" class="tab">
   <div class="rhead anim"><h2>Analisi della composizione corporea</h2><div class="rule"></div>
     <div class="sub">Dati dalle scansioni InBody mensili</div></div>
+  <div class="card anim" id="corpo-summary"></div>
+  <div class="card anim" id="corpo-composition"></div>
+  <div class="anim" id="corpo-dashboard"></div>
   <div class="card anim">
-    <div class="chips" id="metric-chips">
-      <button class="chip on" onclick="setMetric('peso',this)">Peso</button>
-      <button class="chip" onclick="setMetric('smm',this)">Muscolo</button>
-      <button class="chip" onclick="setMetric('bf',this)">% Grasso</button>
-      <button class="chip" onclick="setMetric('fatkg',this)">Grasso kg</button>
-      <button class="chip" onclick="setMetric('aec',this)">AEC</button>
-      <button class="chip" onclick="setMetric('bmr',this)">Basale</button>
-    </div>
+    <div class="note" style="margin:0 0 2px">Tocca una metrica qui sopra per vederne l'andamento.</div>
     <div class="chartbox"><canvas id="chart-body"></canvas></div>
   </div>
-  <div class="card anim" id="bf-range-card"></div>
+  <div class="card anim" id="corpo-gauges"></div>
+
+  <div class="rhead anim"><h2>Dieta vs peso</h2><div class="rule"></div></div>
+  <div class="card anim">
+    <div class="chips" id="dvp-chips" style="margin-bottom:12px"></div>
+    <div class="rlabel">Calorie · assunte vs piano</div>
+    <div class="chartbox" style="height:150px"><canvas id="chart-kcal"></canvas></div>
+    <div class="rlabel" style="margin-top:14px">Peso</div>
+    <div class="chartbox" style="height:150px"><canvas id="chart-peso-dv"></canvas></div>
+    <div class="note" id="dvp-note"></div>
+  </div>
 
   <div class="rhead anim"><h2>Nuova scansione</h2><div class="rule"></div></div>
   <div class="card anim">
@@ -180,7 +186,7 @@
       <label class="f">API key (aistudio.google.com)</label>
       <input type="password" id="gem-key" placeholder="AIza…">
       <label class="f">Modello</label>
-      <input type="text" id="gem-model" placeholder="gemini-2.5-flash">
+      <input type="text" id="gem-model" placeholder="gemini-3-flash-preview">
       <label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="gem-ctx"> Includi i miei dati nel contesto</label>
       <div class="note">La chiave resta salvata solo su questo dispositivo, non finisce mai su GitHub.</div>
       <button class="btn" onclick="saveSettings()">Salva</button>

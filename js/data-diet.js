@@ -24,7 +24,7 @@ const FOOD = {
   salmone:    {n:'Salmone fresco', q:'150 g', k:280},
   pesceazz:   {n:'Pesce azzurro', q:'300 g', k:420},
   tonno:      {n:'Tonno sgocciolato', q:'80 g', k:90},
-  uova:       {n:'2 uova + 1 albume', q:'', k:160},
+  uova:       {n:'2 uova', q:'', k:156},
   bresaola:   {n:'Bresaola / crudo magro', q:'150 g', k:230},
   macinato:   {n:'Macinato (ragù)', q:'80 g', k:150},
   verdura200: {n:'Verdura', q:'200 g', k:50},
@@ -47,48 +47,48 @@ function colazioneGallette(){ return [F('latte'),F('gallette20'),F('burro'),F('p
 function spuntino(){ return [F('frutto'),F('fsecca')]; }
 function merendaAvena(){ return [F('yogurt'),F('avena')]; }
 function merendaFrutta(){ return [F('yogurt'),F('fsecca'),F('frutto')]; }
-function postAll(){ return [F('latte'),F('prot'),F('pane50')]; }
+function merendaCut(){ return [F('yogurt'),F('avena'),F('frutto')]; } // merenda della dieta Cut (uguale ogni giorno)
+function postAll(){ return [F('latte'),F('prot'),F('pane50')]; } // spuntino post-allenamento generico
 
-// preAll = true → il giorno prevede allenamento (cena pre-workout + spuntino post)
+// Dieta CUT (piano attuale del nutrizionista) — organizzata per giorno della settimana.
+// Giorno 1 = Lunedì … Giorno 7 = Domenica (con settings.giorno1 = 1).
+// preAll = true → giorno di allenamento (aggiunge lo spuntino post). Impostabile per giorno dall'Admin.
 const DIET_SEED = {
-  1:{preAll:true, meals:{
+  1:{preAll:false, meals:{ // Lunedì
     col:colazioneFette(), spu:spuntino(),
-    pra:[F('pane50'),F('crossa'),F('verdura200'),F('olio')],
-    mer:merendaAvena(),
-    cen:[F('pasta80'),F('macinato'),F('verdura150'),F('olio')],
-    post:postAll() }},
-  2:{preAll:false, meals:{
-    col:colazionePane(), spu:spuntino(),
+    pra:[F('pane50'),F('cbianca'),F('verdura200'),F('olio')],
+    mer:merendaCut(),
+    cen:[F('pasta80'),F('uova'),F('verdura150'),F('olio')] }},
+  2:{preAll:false, meals:{ // Martedì
+    col:colazioneFette(), spu:spuntino(),
     pra:[F('riso50'),F('legumi'),F('grana'),F('verdura200'),F('olio')],
-    mer:merendaFrutta(),
-    cen:[F('gallette40'),F('pesceazz'),F('verdura200'),F('olio')] }},
-  3:{preAll:true, meals:{
+    mer:merendaCut(),
+    cen:[F('pane50'),F('pesceazz'),F('verdura200'),F('olio')] }},
+  3:{preAll:false, meals:{ // Mercoledì
     col:colazioneFette(), spu:spuntino(),
-    pra:[F('pane50'),F('cbianca'),F('verdura200'),F('olio')],
-    mer:merendaAvena(),
-    cen:[F('pasta80'),F('tonno'),F('verdura150'),F('olio')],
-    post:postAll() }},
-  4:{preAll:false, meals:{
-    col:colazionePane(), spu:spuntino(),
+    pra:[F('pasta80'),F('tonno'),F('verdura150'),F('olio')],
+    mer:merendaCut(),
+    cen:[F('pane50'),F('cbianca'),F('verdura200'),F('olio')] }},
+  4:{preAll:false, meals:{ // Giovedì
+    col:colazioneFette(), spu:spuntino(),
+    pra:[F('pizza'),F('bibita')],
+    mer:merendaCut(),
+    cen:[F('pane50'),F('bresaola'),F('verdura200'),F('olio')] }},
+  5:{preAll:false, meals:{ // Venerdì
+    col:colazioneFette(), spu:spuntino(),
     pra:[F('riso50'),F('legumi'),F('ricotta'),F('verdura200'),F('olio')],
-    mer:merendaFrutta(),
-    cen:[F('gallette40'),F('pesceazz'),F('verdura200'),F('olio')] }},
-  5:{preAll:true, meals:{
+    mer:merendaCut(),
+    cen:[F('pane50'),F('salmone'),F('verdura200'),F('olio')] }},
+  6:{preAll:false, meals:{ // Sabato
     col:colazioneFette(), spu:spuntino(),
-    pra:[F('pane50'),F('cbianca'),F('verdura200'),F('olio')],
-    mer:merendaAvena(),
-    cen:[F('pasta80'),F('uova'),F('verdura150'),F('olio')],
-    post:postAll() }},
-  6:{preAll:false, meals:{
-    col:colazionePane(), spu:spuntino(),
-    pra:[F('riso80'),F('salmone'),F('verdura200'),F('olio')],
-    mer:merendaFrutta(),
-    cen:[F('gallette40'),F('bresaola'),F('verdura200'),F('olio')] }},
-  7:{preAll:false, meals:{
-    col:colazioneGallette(), spu:spuntino(),
+    pra:[F('pasta80'),F('macinato'),F('verdura150'),F('olio')],
+    mer:merendaCut(),
+    cen:[F('pane50'),F('crossa'),F('verdura200'),F('olio')] }},
+  7:{preAll:false, meals:{ // Domenica
+    col:colazioneFette(), spu:spuntino(),
     pra:[F('cbianca'),F('verdura200'),F('olio')],
-    mer:merendaFrutta(),
+    mer:merendaCut(),
     cen:[F('pizza'),F('bibita')] }},
 };
 
-const DIET_NOTE = 'Consiglio cereali integrali (pasta, pane, riso, fette biscottate). Rispetto totale e rigoroso dello schema per 4 settimane.';
+const DIET_NOTE = 'Dieta Cut. Cereali integrali quando possibile (pasta, pane, riso, fette). Rispetto totale e rigoroso dello schema.';
