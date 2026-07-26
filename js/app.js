@@ -18,7 +18,7 @@ const INBODY_SCANS=[
   {date:'2026-04-14',peso:68.7,smm:31.5,bf:18.8,aec:0.369,visc:5,fatkg:12.9,bmr:1575,score:null,note:''},
   {date:'2026-05-12',peso:67.7,smm:30.6,bf:20.1,aec:0.368,visc:5,fatkg:13.6,bmr:1539,score:null,note:''}
 ];
-const DATA_VERSION=4; // bumpalo se aggiungi altre scansioni/dieta canoniche da propagare agli utenti esistenti
+const DATA_VERSION=5; // bumpalo se aggiungi altre scansioni/dieta canoniche da propagare agli utenti esistenti
 const GEM_MODEL_DEFAULT='gemini-3-flash-preview';
 function seed(){
   return {
@@ -34,16 +34,34 @@ function seed(){
 function loadDB(){
   try{const r=localStorage.getItem(KEY); DB=r?JSON.parse(r):null;}catch(e){DB=null;}
   if(!DB) DB=seed();
-  // migrazioni soft
-  DB.notified=DB.notified||{}; DB.diary=DB.diary||{}; DB.chat=DB.chat||[];
-  DB.activeWorkout=DB.activeWorkout||null; DB.exTrans=DB.exTrans||{}; // cache istruzioni tradotte in italiano
+  normalizeDB();
+  if((DB.dataVersion||0) < DATA_VERSION) DB.dataVersion=DATA_VERSION;
+  persist();
+}
+// Rende utilizzabile qualunque DB (nuovo, vecchio o importato da backup):
+// riempie le strutture mancanti e applica le migrazioni. Deve essere
+// tollerante a tutto, altrimenti un backup vecchio blocca l'app al boot.
+function normalizeDB(){
+  const s=seed();
+  ['scans','schede','sessions','chat'].forEach(k=>{ if(!Array.isArray(DB[k])) DB[k]=s[k]; });
+  ['diary','notified','diet','mealTimes','settings'].forEach(k=>{ if(!DB[k]||typeof DB[k]!=='object') DB[k]=s[k]; });
+  DB.settings={...s.settings,...DB.settings};
+  DB.mealTimes={...s.mealTimes,...DB.mealTimes};
+  DB.activeWorkout=DB.activeWorkout||null;
+  DB.chat=[];        // la chat AI riparte pulita a ogni avvio, non si accumula in memoria
+  delete DB.exTrans; // le istruzioni ora sono già in italiano nella libreria locale
   // migrazione esercizi: target "4×8" → serie/reps/recupero strutturati
-  DB.schede.forEach(s=>s.esercizi.forEach(e=>{
-    if(e.sets==null){
-      const m=(e.target||'').match(/(\d+)\s*[x×]\s*(\d+)/i);
-      e.sets=m?parseInt(m[1]):3; e.reps=m?parseInt(m[2]):10; e.rest=e.rest||90;
-    }
-  }));
+  DB.schede.forEach(sc=>{
+    if(!Array.isArray(sc.esercizi)) sc.esercizi=[];
+    sc.esercizi.forEach(e=>{
+      if(e.sets==null){
+        const m=(e.target||'').match(/(\d+)\s*[x×]\s*(\d+)/i);
+        e.sets=m?parseInt(m[1]):3; e.reps=m?parseInt(m[2]):10;
+      }
+      e.rest=parseInt(e.rest)||90;   // senza recupero il timer va in NaN e salta la pausa
+    });
+  });
+  DB.sessions.forEach(se=>{ if(!Array.isArray(se.entries)) se.entries=[]; });
   // migrazione campi InBody extra (grasso in kg + metabolismo basale)
   DB.scans.forEach(s=>{ if(s.fatkg===undefined)s.fatkg=null; if(s.bmr===undefined)s.bmr=null; });
   // migrazione dati reali (una tantum, non distruttiva sulle date già presenti):
@@ -60,8 +78,10 @@ function loadDB(){
   if((DB.dataVersion||0) < 4){ // modello AI di default → Gemini 3 Flash
     if(!DB.settings.gemModel || DB.settings.gemModel==='gemini-2.5-flash') DB.settings.gemModel=GEM_MODEL_DEFAULT;
   }
-  if((DB.dataVersion||0) < DATA_VERSION) DB.dataVersion=DATA_VERSION;
-  persist();
+  if((DB.dataVersion||0) < 5){ // collega le voci della dieta alla tabella alimenti (kcal automatiche)
+    Object.values(DB.diet).forEach(day=>Object.values(day.meals||{}).forEach(items=>
+      items.forEach(it=>{ if(!it.fid){ const g=guessFood(it.n); if(g) it.fid=g.id; } })));
+  }
 }
 function persist(){try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){toast('⚠️ Salvataggio non riuscito');}}
 let st_; function save(){clearTimeout(st_); st_=setTimeout(persist,250);}
@@ -69,7 +89,9 @@ let st_; function save(){clearTimeout(st_); st_=setTimeout(persist,250);}
 /* ---------------- UTILS ---------------- */
 const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
-const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// escape completo: senza virgolette un alimento tipo   Grana 40" g   rompe gli attributi HTML
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const fmtD=d=>{const[y,m,g]=d.split('-');return g+'.'+m+'.'+y.slice(2)};
 const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
 const uid=()=>Date.now()+Math.floor(Math.random()*999);
@@ -88,6 +110,82 @@ function mealsOfDay(dd){ // ordered [{id,nome,ora,items,kcal}]
 }
 function itemsTxt(items){return items.map(i=>i.n+(i.q?' '+i.q:'')).join(', ');}
 function sortedScans(){return [...DB.scans].sort((a,b)=>a.date.localeCompare(b.date));}
+
+/* ================================================================
+   ALIMENTI — le kcal si calcolano da sole
+   Ogni voce di un pasto può essere collegata alla tabella alimenti
+   (campo `fid`). Da lì, cambiando la quantità, kcal e macro vengono
+   ricalcolate: non si digitano più a mano. Il campo kcal resta
+   modificabile come override per i casi fuori tabella (ristorante,
+   ricetta di casa, etichetta di un prodotto specifico).
+   ================================================================ */
+// prova a riconoscere un alimento dal nome scritto a mano.
+// Il confronto è per parole intere: senza, "Latte parz. scremato" finiva
+// sul tè (perché "te" è dentro "latte") e "Frutto" sulla mela.
+function guessFood(nome){
+  const s=foodNorm(nome); if(!s)return null;
+  const parole=s.split(' ').filter(Boolean);
+  const contieneParola=(hay,needle)=>new RegExp('(^| )'+needle.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'( |$)').test(hay);
+  let best=null, bestScore=-1;
+  FOOD_DB.forEach(f=>{
+    const names=[f.n,...(f.al||[])].map(foodNorm).filter(Boolean);
+    let score=-1;
+    names.forEach(n=>{
+      let sc=-1;
+      if(n===s) sc=100;                                   // corrispondenza esatta
+      else if(contieneParola(s,n)) sc=60+n.length/100;    // "pane" dentro "pane integrale"
+      else if(contieneParola(n,s)) sc=40+s.length/100;
+      else if(parole.length>1&&parole.every(p=>contieneParola(n,p))) sc=20;
+      if(sc>score) score=sc;
+    });
+    if(score>bestScore||(score===bestScore&&best&&f.n.length<best.n.length)){ bestScore=score; best=f; }
+  });
+  return bestScore>0?best:null;
+}
+// ricalcola kcal e macro di una voce collegata alla tabella; true se aggiornata
+function recalcItem(it){
+  if(!it||!it.fid)return false;
+  const n=calcNutr(it.fid,it.q);
+  if(!n)return false;
+  it.k=n.k; it.p=n.p; it.c=n.c; it.f=n.f;
+  return true;
+}
+function itemsMacro(items){
+  return (items||[]).reduce((a,i)=>({
+    k:a.k+(+i.k||0), p:a.p+(+i.p||0), c:a.c+(+i.c||0), f:a.f+(+i.f||0)
+  }),{k:0,p:0,c:0,f:0});
+}
+function macroTxt(m){
+  return `${Math.round(m.k)} kcal · P ${m.p.toFixed(0)} · C ${m.c.toFixed(0)} · G ${m.f.toFixed(0)}`;
+}
+
+/* ---- selettore alimenti riutilizzabile ----
+   foodPicker(prefisso, callback) monta ricerca + filtri per categoria
+   dentro i contenitori #<prefisso>-q / -cats / -res già presenti nel DOM. */
+const FP={};
+function foodPickerHTML(pre,placeholder){
+  return `<input type="text" id="${pre}-q" autocomplete="off" placeholder="${placeholder||'Cerca alimento…'}" oninput="renderFoodResults('${pre}')">
+    <div class="chips" id="${pre}-cats" style="margin-top:8px"></div>
+    <div class="foodres" id="${pre}-res"></div>`;
+}
+function foodPicker(pre,onPick){ FP[pre]={cat:'',onPick}; renderFoodCats(pre); renderFoodResults(pre); }
+function setFoodCat(pre,c){ FP[pre].cat=(FP[pre].cat===c?'':c); renderFoodCats(pre); renderFoodResults(pre); }
+function renderFoodCats(pre){
+  const b=$('#'+pre+'-cats'); if(!b)return;
+  b.innerHTML=FOOD_CAT.map(c=>`<button class="chip ${FP[pre].cat===c.id?'on':''}" onclick="setFoodCat('${pre}','${c.id}')">${c.n}</button>`).join('');
+}
+function renderFoodResults(pre){
+  const box=$('#'+pre+'-res'); if(!box)return;
+  const q=($('#'+pre+'-q')||{}).value||'';
+  const hits=searchFood(q,FP[pre].cat);
+  box.innerHTML=hits.length?hits.map(f=>
+    `<button class="foodhit" onclick="fpPick('${pre}','${f.id}')">
+      <span class="fn">${esc(f.n)}</span>
+      <span class="fk">${f.k} kcal<small>/100${f.u||'g'}</small></span>
+    </button>`).join('')
+    :'<div class="note">Non è in tabella: aggiungilo come voce libera scrivendo le kcal a mano.</div>';
+}
+function fpPick(pre,id){ haptic(); FP[pre].onPick(id); }
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),2200);}
 function haptic(){if(navigator.vibrate)navigator.vibrate(12);}
 
@@ -101,11 +199,20 @@ $$('nav button').forEach(b=>b.onclick=()=>{
 });
 
 /* ---------------- SHEETS (bottom overlay) ---------------- */
-function openSheet(html){
+// onClose viene eseguito quando il pannello si chiude o viene sostituito
+// da un altro: serve alla chat AI, che deve ripartire pulita ogni volta.
+let sheetOnClose=null;
+function runSheetClose(){ const f=sheetOnClose; sheetOnClose=null; if(f)f(); }
+function openSheet(html,onClose){
+  runSheetClose();
+  sheetOnClose=onClose||null;
   $('#sheet-body').innerHTML=html;
   $('#sheet-bg').classList.add('on'); $('#sheet').classList.add('on');
 }
-function closeSheet(){$('#sheet-bg').classList.remove('on');$('#sheet').classList.remove('on');}
+function closeSheet(){
+  $('#sheet-bg').classList.remove('on'); $('#sheet').classList.remove('on');
+  runSheetClose();
+}
 $('#sheet-bg').onclick=closeSheet;
 
 /* ================================================================
@@ -183,19 +290,71 @@ function renderMealPrompt(meals,dayLog,now){
       <button class="btn small ghost" onclick="logMeal('${m.id}','skip')">Saltato</button>
     </div></div>`;
 }
-function logMeal(mid,st,kcal,note){
+function logMeal(mid,st,kcal,note,items){
   const t=today(); DB.diary[t]=DB.diary[t]||{};
-  DB.diary[t][mid]={st,kcal:kcal??null,note:note||''};
+  DB.diary[t][mid]={st,kcal:kcal??null,note:note||'',items:items||null};
   save(); haptic();
   toast(st==='ok'?'Pasto registrato ✓':st==='skip'?'Pasto saltato':'Registrato');
   closeSheet(); renderHome();
   if($('#tab-diet').classList.contains('on'))renderDiet();
 }
+
+/* ---- "Ho mangiato altro": componi il pasto, le kcal si sommano da sole ---- */
+let OM={mid:null,items:[]};
 function openOtherMeal(mid){
-  openSheet(`<h3>${MEAL_NAMES[mid]} — cosa hai mangiato?</h3>
-    <label class="f">Descrizione</label><input type="text" id="om-note" placeholder="es. panino con tacchino e insalata">
-    <label class="f">Calorie stimate</label><input type="number" id="om-kcal" inputmode="numeric" placeholder="es. 450">
-    <button class="btn" onclick="logMeal('${mid}','other',parseInt(document.querySelector('#om-kcal').value)||0,document.querySelector('#om-note').value.trim())">Salva</button>`);
+  OM={mid,items:[]};
+  openSheet(`<h3>${esc(MEAL_NAMES[mid])} — cosa hai mangiato?</h3>
+    <div class="note">Scegli gli alimenti e scrivi la quantità: le calorie le calcola l'app.</div>
+    <div id="om-list"></div>
+    <label class="f" style="margin-top:14px">Aggiungi alimento</label>
+    ${foodPickerHTML('om','Cerca: pollo, riso, pizza, yogurt greco…')}
+    <label class="f" style="margin-top:14px">Nota (facoltativa)</label>
+    <input type="text" id="om-note" placeholder="es. pranzo fuori con i colleghi">
+    <button class="btn" onclick="saveOtherMeal()">Salva pasto</button>`);
+  foodPicker('om',id=>{
+    const f=FOOD_BY_ID[id]; if(!f)return;
+    const it={fid:f.id,n:f.n,q:qtaDefault(f)};
+    recalcItem(it); OM.items.push(it);
+    const q=$('#om-q'); if(q)q.value='';
+    renderFoodResults('om'); renderOMList();
+  });
+  renderOMList();
+}
+function renderOMList(){
+  const box=$('#om-list'); if(!box)return;
+  if(!OM.items.length){
+    box.innerHTML=`<div class="note">Nessun alimento aggiunto. Se hai mangiato qualcosa che non è in tabella, aggiungi una <a href="#" onclick="omAddFree();return false">voce libera</a>.</div>`;
+    return;
+  }
+  const m=itemsMacro(OM.items);
+  box.innerHTML=OM.items.map((it,i)=>`
+    <div class="fooditem">
+      <div class="fi-n">${esc(it.n)}${it.fid?'':' <span class="pill">manuale</span>'}</div>
+      <input class="fi-q" type="text" value="${esc(it.q)}" onchange="omSetQ(${i},this.value)" aria-label="Quantità">
+      ${it.fid
+        ? `<div class="fi-k">${it.k}<small> kcal</small></div>`
+        : `<input class="fi-k-in" type="number" inputmode="numeric" value="${+it.k||0}" onchange="omSetK(${i},this.value)" aria-label="kcal">`}
+      <button class="x" onclick="omDel(${i})" aria-label="Rimuovi">✕</button>
+    </div>`).join('')+
+    `<div class="fitot">Totale <b>${Math.round(m.k)} kcal</b> · ${macroTxt(m).split('· ').slice(1).join('· ')}</div>`;
+}
+function omSetQ(i,v){
+  OM.items[i].q=v;
+  if(!recalcItem(OM.items[i])&&OM.items[i].fid) toast('Quantità non chiara: usa "150 g" o "2 cucchiai"');
+  renderOMList();
+}
+function omSetK(i,v){ OM.items[i].k=parseInt(v)||0; renderOMList(); }
+function omDel(i){ OM.items.splice(i,1); renderOMList(); }
+function omAddFree(){
+  const n=prompt('Che cos\'era? (es. tiramisù della nonna)'); if(!n)return;
+  const k=parseInt(prompt('Calorie stimate:')||'0')||0;
+  OM.items.push({n:n.trim(),q:'',k}); renderOMList();
+}
+function saveOtherMeal(){
+  const note=($('#om-note')||{}).value||'';
+  if(!OM.items.length&&!note.trim()){toast('Aggiungi almeno un alimento');return;}
+  const m=itemsMacro(OM.items);
+  logMeal(OM.mid,'other',Math.round(m.k),note.trim()||itemsTxt(OM.items),OM.items.slice());
 }
 
 /* ================================================================
@@ -213,15 +372,18 @@ function renderDiet(){
   const isToday=dietDaySel===todayDD;
   const dayLog=isToday?(DB.diary[today()]||{}):{};
   const tot=meals.reduce((a,m)=>a+m.kcal,0);
+  const mac=itemsMacro(meals.flatMap(m=>m.items));
   $('#diet-day-info').innerHTML=`<span class="pill ${DB.diet[dietDaySel].preAll?'r':''}">${DB.diet[dietDaySel].preAll?'Giorno di allenamento':'Giorno di riposo'}</span>
-    <span class="pill">${tot} kcal totali</span>${isToday?' <span class="pill g">Oggi</span>':''}`;
+    <span class="pill">${tot} kcal totali</span>
+    <span class="pill">P ${mac.p.toFixed(0)} g · C ${mac.c.toFixed(0)} g · G ${mac.f.toFixed(0)} g</span>${isToday?' <span class="pill g">Oggi</span>':''}`;
   $('#diet-meals').innerHTML=meals.map(m=>{
     const l=dayLog[m.id];
     const stCls=l?(' '+l.st):'';
     const stIc=l?(l.st==='ok'?'✓':l.st==='other'?'≠':'—'):'';
     return `<div class="mealrow">
       <div style="flex:1"><div class="nm">${m.nome} <span class="s" style="color:var(--muted);font-weight:400">${m.ora}</span></div>
-      <div class="items">${esc(itemsTxt(m.items))}${l&&l.st==='other'?'<br><i>→ '+esc(l.note||'altro')+' ('+(l.kcal||0)+' kcal)</i>':''}</div></div>
+      <div class="items">${esc(itemsTxt(m.items))}${l&&l.st==='other'
+        ?'<br><i>→ '+esc(l.items&&l.items.length?itemsTxt(l.items):(l.note||'altro'))+' ('+(l.kcal||0)+' kcal)</i>':''}</div></div>
       <div class="kc">${m.kcal}<br>kcal</div>
       ${isToday?`<button class="state${stCls}" onclick="cycleMeal('${m.id}')" aria-label="Stato pasto">${stIc}</button>`:''}
     </div>`;
@@ -286,27 +448,6 @@ function parseScheme(str){
 function firstRep(scheme){const n=scheme.find(x=>typeof x==='number'&&x>0);return n||8;}
 function exScheme(ex){return ex.scheme&&ex.scheme.length?ex.scheme:Array(ex.sets||3).fill(ex.reps||10);} // array target per serie
 function schemeLabel(ex){const s=exScheme(ex);return s.every(x=>x===s[0])?s.length+'×'+s[0]:s.join('·');}
-/* ---- vocabolario libreria esercizi → italiano ---- */
-const IT_MUSC={chest:'pettorali',triceps:'tricipiti',biceps:'bicipiti',shoulders:'spalle',forearms:'avambracci',
-  forearm:'avambracci',forerm:'avambracci',lats:'dorsali','middle back':'schiena centrale','upper back':'schiena alta',
-  back:'schiena','lower back':'lombari',traps:'trapezi',trapezius:'trapezi',neck:'collo','neck extensors':'collo',
-  'neck flexors':'collo','neck side flexors':'collo',quadriceps:'quadricipiti',hamstrings:'femorali',hamstring:'femorali',
-  glutes:'glutei',gluts:'glutei',calves:'polpacci',abdominals:'addominali','lower abdominals':'addominali bassi',
-  obliques:'obliqui',core:'core',arms:'braccia',adductors:'adduttori',abductors:'abduttori','hip abductors':'abduttori',
-  'lateral deltoid':'deltoide laterale','rear deltoid':'deltoide posteriore','posterior deltoid':'deltoide posteriore',
-  should:'spalle',bicpes:'bicipiti'};
-const IT_LEVEL={beginner:'principiante',intermediate:'intermedio',expert:'avanzato',
-  compound:'multiarticolare',isolation:'di isolamento',isometric:'isometrico'};
-const IT_EQUIP={barbell:'bilanciere',dumbbell:'manubri',dumbbells:'manubri',dumbell:'manubri',cable:'cavi',
-  'cable machine':'ai cavi',machine:'macchina',body:'corpo libero','body only':'corpo libero',bench:'panca',
-  'flat bench':'panca piana','incline bench':'panca inclinata','decline bench':'panca declinata','smith machine':'multipower',
-  bar:'sbarra','parallel bars':'parallele','bench press machine':'chest press','hyperextension bench':'panca lombare',
-  'chest machine':'macchina pettorali','butterfly machine':'pectoral machine','t-bar machine':'t-bar','v-bar':'maniglia a V',
-  kettlebells:'kettlebell',bands:'elastici',band:'elastici','exercise band':'elastici','medicine ball':'palla medica',
-  'exercise ball':'fitball','swiss ball':'fitball','stability ball':'fitball','bosu ball':'bosu','balance board':'tavoletta propriocettiva',
-  'weight plate':'disco',weight:'peso','barbell or dumbbell':'bilanciere o manubri','e-z curl bar':'bilanciere EZ',
-  other:'altro',none:'nessuno','foam roll':'foam roller'};
-const itMap=(m,v)=>v?(m[String(v).toLowerCase()]||v):v;
 function instrOL(steps){return '<ol style="padding-left:18px;font-size:.85rem;line-height:1.5;color:#44403C;margin-top:6px">'+steps.map(i=>'<li style="margin-bottom:6px">'+esc(i)+'</li>').join('')+'</ol>';}
 function startWorkout(){
   const sch=DB.schede.find(s=>s.id==$('#ws-scheda').value);
@@ -385,10 +526,11 @@ function renderPlayer(){
     return;
   }
   const sugg=ex.peso||lastWeight(ex.nome);
-  const nameJs=esc(ex.nome).replace(/'/g,"\\'");
+  // JSON.stringify + esc: un nome con apostrofo (es. "Curl all'arco") non rompe l'handler
+  const argJs=esc(JSON.stringify(String(ex.nome||'')))+','+esc(JSON.stringify(String(ex.dbId||'')));
   $('#pl-body').innerHTML=`
     <div class="pl-ex">
-      <div class="pl-hero noimg" id="pl-hero" onclick="openExDetailByName('${nameJs}','${ex.dbId||''}')" role="button" aria-label="Dettaglio esercizio ${esc(ex.nome)}">
+      <div class="pl-hero noimg" id="pl-hero" onclick="openExDetailByName(${argJs})" role="button" aria-label="Dettaglio esercizio ${esc(ex.nome)}">
         <div class="pl-hero-grad"></div>
         <div class="pl-hero-cap">
           <div class="pl-hero-sub">Esercizio ${PL.exIdx+1} di ${totEx}</div>
@@ -418,17 +560,14 @@ function renderPlayer(){
 }
 // carica l'illustrazione dell'esercizio nel player (crossfade fra le 2 pose)
 let plHeroT=null;
-async function loadPlayerHero(ex){
+function loadPlayerHero(ex){
   clearTimeout(plHeroT);
-  const hero=$('#pl-hero'); if(!hero||!ex.dbId)return; // esercizio manuale → resta la card maroon
-  try{
-    await loadEXDB();
-    const e=EXDB.find(x=>x.id===ex.dbId);
-    if(!e||!(e.images||[]).length)return;
-    const imgs=e.images.map((p,i)=>`<img class="exframe" data-i="${i}" src="${EXIMG+p}" alt="" onload="var h=this.closest('.pl-hero');if(h)h.classList.remove('noimg')" onerror="this.remove()">`).join('');
-    const h=$('#pl-hero'); if(!h)return; h.insertAdjacentHTML('afterbegin',imgs);
-    if(e.images.length>1)(function loop(){const hh=$('#pl-hero');if(!hh)return;hh.classList.toggle('show1');plHeroT=setTimeout(loop,1300);})();
-  }catch(_){}
+  const hero=$('#pl-hero'); if(!hero||!ex.dbId)return;   // esercizio manuale → resta la card maroon
+  const e=exFind(ex.dbId); if(!e||!e.ek)return;          // nessuna illustrazione fedele → idem
+  const imgs=exImages(e.ek);
+  hero.insertAdjacentHTML('afterbegin',imgs.map((p,i)=>
+    `<img class="exframe" data-i="${i}" src="${p}" alt="" onload="var h=this.closest('.pl-hero');if(h)h.classList.remove('noimg')" onerror="this.remove()">`).join(''));
+  (function loop(){const hh=$('#pl-hero');if(!hh)return;hh.classList.toggle('show1');plHeroT=setTimeout(loop,1300);})();
 }
 let plRpe=null;
 function setRpe(v){ plRpe=(plRpe===v?null:v); $$('.pl-rpe .rpe').forEach(b=>b.classList.toggle('on',+b.dataset.v===plRpe)); haptic(); }
@@ -553,122 +692,119 @@ function renderProgChart(){
     data:{labels:pts.map(p=>p.d),datasets:[{data:pts.map(p=>p.v)}]},options:lineOpts('kg')});
 }
 
-/* ---------------- LIBRERIA ESERCIZI (open source, 873 esercizi) ---------------- */
-// Libreria illustrata (disegni line-art) — Everkinetic, CC BY-SA 4.0
-const EXDB_URL='https://raw.githubusercontent.com/everkinetic/data/master/exercises.json';
-const EXIMG='https://raw.githubusercontent.com/everkinetic/data/master/dist/svg/';
-let EXDB=null, exTargetScheda=null;
-const toArrLC=v=>Array.isArray(v)?v:(v?String(v).split(',').map(s=>s.trim()).filter(Boolean):[]);
-// normalizza un esercizio Everkinetic nello schema usato dall'app
-function normEx(e){
-  const idn=e.id_num||String(e.id||'').padStart(4,'0');
-  return {
-    id:'ek-'+idn,
-    name:e.title||e.name||'Esercizio',
-    images:[idn+'-relaxation.svg', idn+'-tension.svg'], // 2 pose: inizio → fine
-    primaryMuscles:[...toArrLC(e.primary), ...toArrLC(e.secondary)],
-    level:e.type||'',                 // compound/isolation/isometric → tradotto da IT_LEVEL
-    equipment:toArrLC(e.equipment).map(x=>itMap(IT_EQUIP,x)).join(', '),
-    instructions:e.steps||[]
-  };
+/* ---------------- LIBRERIA ESERCIZI (italiana, offline) ----------------
+   I dati stanno in js/data-exercises.js: nessuna chiamata di rete, la
+   ricerca funziona anche in aereo. Dalla rete arrivano solo le
+   illustrazioni (Everkinetic, CC BY-SA 4.0), che il service worker
+   mette in cache dopo la prima visualizzazione. */
+let exTargetScheda=null, exQ='', exG='', exA='';
+// vecchie schede salvate con dbId 'ek-0042' → ritrovano la scheda italiana se esiste
+const EK_TO_LOCAL={}; EX_LIB.forEach(e=>{ if(e.ek && !EK_TO_LOCAL[e.ek]) EK_TO_LOCAL[e.ek]=e.id; });
+const EX_BY_ID=Object.fromEntries(EX_LIB.map(e=>[e.id,e]));
+function exFind(id){
+  if(!id) return null;
+  if(EX_BY_ID[id]) return EX_BY_ID[id];
+  if(String(id).startsWith('ek-')){                       // compatibilità con le schede vecchie
+    const ek=String(id).slice(3);
+    if(EK_TO_LOCAL[ek]) return EX_BY_ID[EK_TO_LOCAL[ek]];
+    return {id, n:'Esercizio', al:[], g:'', m:[], at:'', t:'', ek, ex:[], _legacy:true};
+  }
+  return null;
 }
-const IT2EN={panca:'bench press',stacco:'deadlift',trazioni:'pull up',rematore:'row',spinte:'press',
-  croci:'fly',alzate:'raise','alzate laterali':'lateral raise',affondi:'lunge',polpacci:'calf',
-  'lat machine':'pulldown',bicipiti:'curl',tricipiti:'triceps',spalle:'shoulder',addominali:'ab',
-  gambe:'leg',petto:'chest',schiena:'back',glutei:'glute',militare:'military press',squat:'squat'};
-async function loadEXDB(){
-  if(EXDB)return EXDB;
-  const r=await fetch(EXDB_URL); const raw=await r.json();
-  EXDB=raw.map(normEx).filter(e=>e.name);
-  return EXDB;
+function exSearch(){
+  const terms=exNorm(exQ).split(' ').filter(Boolean);
+  // chi ha il termine nel nome viene prima di chi ce l'ha solo fra i muscoli:
+  // cercando "polpacci" voglio il calf, non il leg curl che li cita di sfuggita
+  const rank=e=>{
+    if(!terms.length) return 0;
+    const nome=exNorm(e.n), alias=exNorm(e.al.join(' '));
+    if(terms.every(t=>nome.includes(t))) return 0;
+    if(terms.every(t=>alias.includes(t))) return 1;
+    return 2;
+  };
+  return EX_LIB.filter(e=>
+    (!exG||e.g===exG) && (!exA||e.at===exA) && terms.every(t=>e._s.includes(t))
+  ).sort((a,b)=>rank(a)-rank(b)||a.n.localeCompare(b.n));
 }
 function openExSearch(schedaId){
-  exTargetScheda=schedaId;
+  exTargetScheda=schedaId; exQ=''; exG=''; exA='';
   openSheet(`<h3>Libreria esercizi</h3>
-    <div class="note">Esercizi illustrati con istruzioni. Cerca in inglese o italiano (es. "panca", "squat", "curl").</div>
-    <input type="text" id="ex-q" placeholder="Cerca…" oninput="searchEx()" style="margin-top:10px">
-    <div id="ex-results" style="margin-top:8px"><div class="note">Caricamento libreria…</div></div>
+    <div class="note">${EX_LIB.length} esercizi in italiano, con i nomi delle macchine come li usiamo in sala. Cerca "pressa", "glute drive", "lat machine", "leg curl"… oppure filtra qui sotto.</div>
+    <input type="text" id="ex-q" placeholder="Cerca esercizio o macchina…" oninput="exQ=this.value;renderExResults()" style="margin-top:10px">
+    <div class="chips" id="ex-f-gruppo" style="margin-top:10px"></div>
+    <div class="chips" id="ex-f-attrezzo" style="margin-top:6px"></div>
+    <div id="ex-results" style="margin-top:10px"></div>
     <div class="note" style="opacity:.7;margin-top:12px">Illustrazioni: Everkinetic · CC BY-SA 4.0</div>`);
-  loadEXDB().then(()=>{$('#ex-results').innerHTML='<div class="note">Scrivi per cercare.</div>';$('#ex-q').focus();})
-    .catch(()=>$('#ex-results').innerHTML='<div class="note">⚠️ Libreria non raggiungibile (serve connessione). Aggiungi l\'esercizio a mano.</div>');
+  renderExFilters(); renderExResults();
 }
-function searchEx(){
-  const q=$('#ex-q').value.trim().toLowerCase();
-  if(!EXDB||q.length<2){$('#ex-results').innerHTML='<div class="note">Scrivi almeno 2 lettere.</div>';return;}
-  let terms=[q];
-  Object.entries(IT2EN).forEach(([it,en])=>{if(q.includes(it))terms.push(en);});
-  const hits=EXDB.filter(e=>terms.some(t=>e.name.toLowerCase().includes(t))).slice(0,20);
-  $('#ex-results').innerHTML=hits.length?hits.map(e=>
-    `<div class="exhit" onclick='pickEx(${JSON.stringify(e.id)})'>
-      <img loading="lazy" src="${EXIMG+(e.images[0]||'')}" alt="" onerror="this.style.visibility='hidden'">
-      <div><div class="n">${esc(e.name)}</div><div class="m">${esc((e.primaryMuscles||[]).map(m=>itMap(IT_MUSC,m)).join(', '))}${e.equipment?' · '+esc(e.equipment):''}</div></div>
-      <span class="chev">▸</span>
-    </div>`).join(''):'<div class="note">Nessun risultato: prova in inglese (es. "bench press").</div>';
+function setExG(g){ exG=(exG===g?'':g); renderExFilters(); renderExResults(); }
+function setExA(a){ exA=(exA===a?'':a); renderExFilters(); renderExResults(); }
+function renderExFilters(){
+  const g=$('#ex-f-gruppo'), a=$('#ex-f-attrezzo');
+  if(g)g.innerHTML=EX_GRUPPI.map(x=>`<button class="chip ${exG===x.id?'on':''}" onclick="setExG('${x.id}')">${x.n}</button>`).join('');
+  if(a)a.innerHTML=EX_ATTREZZI.map(x=>`<button class="chip ${exA===x.id?'on':''}" onclick="setExA('${x.id}')">${x.n}</button>`).join('');
 }
+function renderExResults(){
+  const box=$('#ex-results'); if(!box)return;
+  const hits=exSearch();
+  if(!hits.length){ box.innerHTML='<div class="note">Nessun esercizio trovato. Togli un filtro, oppure aggiungilo a mano dalla scheda.</div>'; return; }
+  const shown=hits.slice(0,40);
+  box.innerHTML=shown.map(e=>{
+    const img=exImages(e.ek)[0];
+    return `<div class="exhit" onclick="pickEx('${e.id}')">
+      ${img?`<img loading="lazy" src="${img}" alt="" onerror="this.replaceWith(exNoImg())">`:exNoImgHTML(e)}
+      <div><div class="n">${esc(e.n)}</div>
+      <div class="m">${esc(EX_GRUPPO_NOME[e.g])} · ${esc(EX_ATTREZZO_NOME[e.at])} · ${esc(e.m[0]||'')}</div></div>
+      <span class="chev">▸</span></div>`;
+  }).join('')+(hits.length>shown.length?`<div class="note">Altri ${hits.length-shown.length} risultati: affina la ricerca.</div>`:'');
+}
+// segnaposto quando non esiste un'illustrazione fedele al movimento
+function exNoImgHTML(e){return `<div class="exhit-ph">${esc((EX_GRUPPO_NOME[e.g]||'?').slice(0,3).toUpperCase())}</div>`;}
+function exNoImg(){const d=document.createElement('div');d.className='exhit-ph';d.textContent='—';return d;}
 function pickEx(id){
-  const e=EXDB.find(x=>x.id===id); if(!e)return;
+  const e=exFind(id); if(!e)return;
   openSheet(exDetailHTML(e)+`
     <div class="grid2" style="margin-top:14px">
       <div><span class="mini">Ripetizioni (schema)</span><input type="text" id="pk-r" value="4x8" placeholder="es. 12-10-8-8"></div>
       <div><span class="mini">Rec. (s)</span><input type="number" id="pk-w" value="90" inputmode="numeric"></div>
     </div>
     <input type="text" id="pk-note" placeholder="Nota (facoltativa, es. ultima serie in stripping)" style="margin-top:8px">
-    <button class="btn" onclick='confirmPickEx(${JSON.stringify(e.id)})'>Aggiungi alla scheda</button>
+    <button class="btn" onclick="confirmPickEx('${e.id}')">Aggiungi alla scheda</button>
     <button class="btn ghost" onclick="openExSearch(exTargetScheda)">← Torna alla ricerca</button>`);
-  startExAnim(e); translateEx(e);
+  startExAnim(e);
 }
 function confirmPickEx(id){
-  const e=EXDB.find(x=>x.id===id);
-  const sch=DB.schede.find(s=>s.id===exTargetScheda); if(!sch)return;
+  const e=exFind(id);
+  const sch=DB.schede.find(s=>s.id===exTargetScheda); if(!sch||!e)return;
   const scheme=parseScheme($('#pk-r').value)||[8,8,8,8];
-  sch.esercizi.push({nome:e.name,dbId:e.id,scheme,
+  sch.esercizi.push({nome:e.n,dbId:e.id,scheme,
     sets:scheme.length,reps:firstRep(scheme),rest:parseInt($('#pk-w').value)||90,note:($('#pk-note').value||'').trim()});
-  save(); closeSheet(); renderGym(); toast(e.name+' aggiunto ✓');
+  save(); closeSheet(); renderGym(); toast(e.n+' aggiunto ✓');
   document.querySelector(`details[data-id="${exTargetScheda}"]`)?.setAttribute('open','');
 }
 function exDetailHTML(e){
-  const imgs=(e.images||[]); const two=imgs.length>1;
-  const meta=[(e.primaryMuscles||[]).map(m=>itMap(IT_MUSC,m)).join(', '),itMap(IT_LEVEL,e.level),itMap(IT_EQUIP,e.equipment)].filter(Boolean).join(' · ');
-  const cached=DB.exTrans&&DB.exTrans[e.id];
-  const steps=((cached&&cached.length)?cached:(e.instructions||[])).slice(0,8);
-  const hasEng=(e.instructions||[]).length;
-  const status=cached?'🇮🇹 in italiano':(hasEng?(DB.settings.gemKey?'traduco in italiano…':'in inglese · attiva l\'AI in Admin'):'');
-  return `<h3>${esc(e.name)}</h3>
-    <div class="note" style="text-transform:capitalize">${esc(meta)}</div>
-    <div class="exview" id="ex-view">
+  const imgs=exImages(e.ek), two=imgs.length>1;
+  const meta=[EX_GRUPPO_NOME[e.g], EX_ATTREZZO_NOME[e.at], e.t].filter(Boolean).join(' · ');
+  return `<h3>${esc(e.n)}</h3>
+    <div class="note">${esc(meta)}</div>
+    ${e.m&&e.m.length?`<div class="chips" style="margin-top:8px">${e.m.map(m=>`<span class="pill">${esc(m)}</span>`).join('')}</div>`:''}
+    ${two?`<div class="exview" id="ex-view">
       <div class="exview-skel"></div>
-      ${imgs.map((p,i)=>`<img class="exframe" data-i="${i}" src="${EXIMG+p}" alt="Posizione ${i+1}" onload="exViewLoaded()" onerror="exViewLoaded()">`).join('')}
-      ${two?'<div class="exview-badge" id="ex-frame-lbl">Posizione 1 · inizio</div><div class="exview-dots"><span class="on"></span><span></span></div>':''}
-    </div>
-    ${two?'<div class="note" style="margin-top:6px">Illustrazione animata dell\'esecuzione (inizio → fine).</div>':''}
-    <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(e.name+' esecuzione tutorial')}"><span>▶</span> Guarda i video su YouTube</a>
-    ${steps.length?`<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:14px;gap:10px">
-      <label class="f" style="margin:0">Esecuzione</label>
-      <span class="note" id="ex-trans-status" style="margin:0;text-align:right">${status}</span></div>
-      <div id="ex-instr">${instrOL(steps)}</div>`:''}
-    <div class="note" style="opacity:.65;margin-top:12px">Illustrazione: Everkinetic · CC BY-SA 4.0</div>`;
-}
-// Traduce in italiano le istruzioni (una tantum, poi in cache) usando Gemini
-async function translateEx(e){
-  if(!e||!(e.instructions||[]).length)return;
-  if(DB.exTrans&&DB.exTrans[e.id]&&DB.exTrans[e.id].length)return; // già tradotto
-  if(!DB.settings.gemKey)return;
-  try{
-    const prompt=`Traduci in italiano queste istruzioni dell'esercizio "${e.name}", chiare e pratiche. Rispondi SOLO con i passaggi tradotti, uno per riga, senza numeri né trattini né elenco puntato:\n`+e.instructions.join('\n');
-    const t=await geminiOnce(prompt);
-    const steps=t.split('\n').map(s=>s.replace(/^\s*[\d.)\-•–]+\s*/,'').trim()).filter(Boolean).slice(0,8);
-    if(steps.length){
-      DB.exTrans=DB.exTrans||{}; DB.exTrans[e.id]=steps; save();
-      const box=$('#ex-instr'); if(box)box.innerHTML=instrOL(steps);
-      const st=$('#ex-trans-status'); if(st)st.textContent='🇮🇹 in italiano';
-    }
-  }catch(_){ const st=$('#ex-trans-status'); if(st)st.textContent='in inglese (traduzione non riuscita)'; }
+      ${imgs.map((p,i)=>`<img class="exframe" data-i="${i}" src="${p}" alt="Posizione ${i+1}" onload="exViewLoaded()" onerror="exViewLoaded()">`).join('')}
+      <div class="exview-badge" id="ex-frame-lbl">Posizione 1 · inizio</div><div class="exview-dots"><span class="on"></span><span></span></div>
+     </div>
+     <div class="note" style="margin-top:6px">Illustrazione animata dell'esecuzione (inizio → fine). Richiede la rete la prima volta, poi resta in cache.</div>`
+    :'<div class="note" style="margin-top:10px">Per questo esercizio non esiste un\'illustrazione fedele al movimento: meglio nessun disegno che uno sbagliato. Guarda il video qui sotto.</div>'}
+    <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(e.n+' esecuzione corretta')}"><span>▶</span> Guarda i video su YouTube</a>
+    ${e.ex&&e.ex.length?`<label class="f" style="margin-top:14px">Esecuzione</label><div id="ex-instr">${instrOL(e.ex)}</div>`:''}
+    ${e.al&&e.al.length?`<div class="note" style="opacity:.75">Anche conosciuto come: ${esc(e.al.join(' · '))}</div>`:''}
+    ${two?'<div class="note" style="opacity:.65;margin-top:10px">Illustrazione: Everkinetic · CC BY-SA 4.0</div>':''}`;
 }
 let exAnimT=null;
 function exViewLoaded(){const v=$('#ex-view');if(v)v.classList.add('loaded');}
 function startExAnim(e){ // crossfade fra le 2 pose → mini animazione dell'esecuzione
   clearTimeout(exAnimT);
-  if(!e.images||e.images.length<2)return;
+  if(!e||!e.ek)return;
   (function loop(){
     const v=$('#ex-view'); if(!v)return;
     const on=v.classList.toggle('show1');
@@ -678,14 +814,13 @@ function startExAnim(e){ // crossfade fra le 2 pose → mini animazione dell'ese
     exAnimT=setTimeout(loop,1200);
   })();
 }
-async function openExDetailByName(name,dbId){
-  try{
-    await loadEXDB();
-    const e=dbId?EXDB.find(x=>x.id===dbId):EXDB.find(x=>x.name.toLowerCase()===name.toLowerCase());
-    if(e){openSheet(exDetailHTML(e));startExAnim(e);translateEx(e);return;}
-  }catch(_){}
+function openExDetailByName(name,dbId){
+  const e=exFind(dbId)||EX_LIB.find(x=>exNorm(x.n)===exNorm(name));
+  if(e&&!e._legacy){openSheet(exDetailHTML(e));startExAnim(e);return;}
+  // esercizio aggiunto a mano: scheda minima con il link ai video
   openSheet(`<h3>${esc(name)}</h3>
-    <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(name+' esecuzione tutorial')}"><span>▶</span> Guarda i video su YouTube</a>`);
+    <div class="note">Esercizio inserito a mano, non collegato alla libreria.</div>
+    <a class="ytbtn" target="_blank" rel="noopener" href="https://www.youtube.com/results?search_query=${encodeURIComponent(name+' esecuzione corretta')}"><span>▶</span> Guarda i video su YouTube</a>`);
 }
 
 /* ================================================================
@@ -908,27 +1043,41 @@ function renderAdmin(){
   $('#ad-giorno1').innerHTML=[1,2,3,4,5,6,7].map(d=>`<option value="${d}"${DB.settings.giorno1===d?' selected':''}>${WDNAMES[d]}</option>`).join('');
   ['col','spu','pra','mer','cen','post'].forEach(id=>{const e=$('#mt-'+id);if(e)e.value=DB.mealTimes[id]||'';});
   $('#ad-notif').checked=DB.settings.notif;
-  $('#gem-key').value=DB.settings.gemKey||''; $('#gem-model').value=DB.settings.gemModel||'gemini-2.5-flash';
+  renderNotifStato();
+  $('#gem-key').value=DB.settings.gemKey||''; $('#gem-model').value=DB.settings.gemModel||GEM_MODEL_DEFAULT;
   $('#gem-ctx').checked=DB.settings.gemCtx!==false;
   renderAdmDiet();
+}
+// dice a colpo d'occhio se le notifiche possono funzionare e, se no, perché
+function renderNotifStato(){
+  const box=$('#notif-stato'); if(!box)return;
+  const st=notifStato();
+  box.innerHTML=`<div class="note" style="margin-top:8px">
+    <span class="pill ${st.ok?'g':'r'}">${st.ok?'attive':'non attive'}</span> ${esc(st.txt)}</div>`;
 }
 function saveSettings(){
   DB.settings.giorno1=parseInt($('#ad-giorno1').value);
   ['col','spu','pra','mer','cen','post'].forEach(id=>{const v=$('#mt-'+id).value;if(v)DB.mealTimes[id]=v;});
   DB.settings.gemKey=$('#gem-key').value.trim();
-  DB.settings.gemModel=$('#gem-model').value.trim()||'gemini-2.5-flash';
+  DB.settings.gemModel=$('#gem-model').value.trim()||GEM_MODEL_DEFAULT; // svuotare il campo tornava a un modello incompatibile con la richiesta
   DB.settings.gemCtx=$('#gem-ctx').checked;
   save(); toast('Impostazioni salvate ✓'); dietDaySel=null;
 }
 async function toggleNotif(){
   const want=$('#ad-notif').checked;
   if(want){
-    if(!('Notification' in window)){toast('Notifiche non supportate');$('#ad-notif').checked=false;return;}
-    const p=await Notification.requestPermission();
-    if(p!=='granted'){toast('Permesso negato');$('#ad-notif').checked=false;return;}
+    const st=notifStato();
+    // se il browser non le supporta o l'app non è installata in Home, chiedere
+    // il permesso non serve a niente: meglio dire subito qual è l'ostacolo
+    if(!st.ok && st.cod!=='default'){
+      toast('⚠️ Non è possibile attivarle'); $('#ad-notif').checked=false; renderNotifStato(); return;
+    }
+    let p=Notification.permission;
+    if(p==='default') p=await Notification.requestPermission();
+    if(p!=='granted'){toast('Permesso negato');$('#ad-notif').checked=false;renderNotifStato();return;}
     toast('Notifiche attive ✓');
   }
-  DB.settings.notif=$('#ad-notif').checked; save();
+  DB.settings.notif=$('#ad-notif').checked; save(); renderNotifStato();
 }
 function renderAdmDiet(){
   $('#adm-diet-chips').innerHTML=[1,2,3,4,5,6,7].map(d=>
@@ -937,16 +1086,47 @@ function renderAdmDiet(){
   const order=['col','spu','pra','mer','cen','post'];
   $('#adm-diet-body').innerHTML=
     `<label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" ${day.preAll?'checked':''} onchange="admTogglePre(this.checked)"> Giorno di allenamento (cena pre-workout + spuntino post)</label>`+
-    order.filter(id=>day.meals[id]).map(id=>
-      `<label class="f" style="margin-top:14px">${MEAL_NAMES[id]}</label>`+
+    order.filter(id=>day.meals[id]).map(id=>{
+      const m=itemsMacro(day.meals[id]);
+      return `<label class="f" style="margin-top:16px;display:flex;justify-content:space-between;align-items:baseline">
+        <span>${MEAL_NAMES[id]}</span><span style="text-transform:none;letter-spacing:0">${macroTxt(m)}</span></label>`+
       day.meals[id].map((it,i)=>
-        `<div style="display:grid;grid-template-columns:1fr 76px 64px 34px;gap:6px;margin-bottom:6px">
-        <input type="text" value="${esc(it.n)}" onchange="admEditItem('${id}',${i},'n',this.value)" placeholder="Alimento">
-        <input type="text" value="${esc(it.q||'')}" onchange="admEditItem('${id}',${i},'q',this.value)" placeholder="Qtà">
-        <input type="number" value="${it.k}" onchange="admEditItem('${id}',${i},'k',parseInt(this.value)||0)" placeholder="kcal" inputmode="numeric">
-        <button class="x" onclick="admDelItem('${id}',${i})">✕</button></div>`).join('')+
-      `<button class="btn small ghost" onclick="admAddItem('${id}')">+ alimento</button>`
-    ).join('');
+        `<div class="admfood">
+          <input class="af-n" type="text" value="${esc(it.n)}" onchange="admEditItem('${id}',${i},'n',this.value)" placeholder="Alimento">
+          <input class="af-q" type="text" value="${esc(it.q||'')}" onchange="admSetQ('${id}',${i},this.value)" placeholder="Qtà">
+          <input class="af-k" type="number" value="${+it.k||0}" onchange="admEditItem('${id}',${i},'k',parseInt(this.value)||0)" placeholder="kcal" inputmode="numeric"
+                 ${it.fid?'readonly title="Calcolate dalla tabella alimenti: cambia la quantità, oppure scollega l\'alimento"':''}>
+          <button class="af-b" onclick="admLinkFood('${id}',${i})" title="${it.fid?'Alimento collegato: kcal automatiche':'Collega alla tabella alimenti'}">${it.fid?'🔗':'🔍'}</button>
+          <button class="x" onclick="admDelItem('${id}',${i})" aria-label="Elimina">✕</button>
+        </div>`).join('')+
+      `<button class="btn small ghost" onclick="admAddItem('${id}')">+ alimento</button>`;
+    }).join('')+
+    `<div class="note" style="margin-top:16px">🔍 collega una voce alla tabella alimenti: da quel momento basta cambiare la quantità e le kcal si ricalcolano da sole. 🔗 = già collegata; toccala di nuovo per scollegarla e scrivere le kcal a mano.</div>`;
+}
+function admSetQ(mid,i,v){
+  const it=DB.diet[admDietDay].meals[mid][i];
+  it.q=v;
+  if(it.fid&&!recalcItem(it)) toast('Quantità non chiara: usa "150 g", "2 cucchiai", "1 vasetto"');
+  save(); renderAdmDiet();
+}
+function admLinkFood(mid,i){
+  const it=DB.diet[admDietDay].meals[mid][i];
+  if(it.fid){ // già collegata → scollega e torna a kcal manuali
+    delete it.fid; delete it.p; delete it.c; delete it.f;
+    save(); renderAdmDiet(); toast('Alimento scollegato: kcal manuali');
+    return;
+  }
+  openSheet(`<h3>Collega "${esc(it.n||'alimento')}"</h3>
+    <div class="note">Scegli l'alimento: da qui in poi le kcal di questa voce si calcolano dalla quantità.</div>
+    ${foodPickerHTML('af','Cerca alimento…')}`);
+  foodPicker('af',fid=>{
+    const f=FOOD_BY_ID[fid];
+    it.fid=fid; if(!it.n||guessFood(it.n)===f) it.n=f.n;
+    if(!it.q) it.q=qtaDefault(f);
+    if(!recalcItem(it)){ it.q=qtaDefault(f); recalcItem(it); }
+    save(); closeSheet(); renderAdmDiet(); toast(f.n+' collegato ✓');
+  });
+  const q=$('#af-q'); if(q&&it.n){ q.value=it.n; renderFoodResults('af'); }
 }
 function admTogglePre(v){
   const day=DB.diet[admDietDay]; day.preAll=v;
@@ -954,7 +1134,12 @@ function admTogglePre(v){
   if(!v)delete day.meals.post;
   save(); renderAdmDiet();
 }
-function admEditItem(mid,i,field,val){DB.diet[admDietDay].meals[mid][i][field]=val;save();}
+function admEditItem(mid,i,field,val){
+  const it=DB.diet[admDietDay].meals[mid][i];
+  it[field]=val;
+  if(field==='k'&&it.fid){ delete it.fid; delete it.p; delete it.c; delete it.f; } // kcal scritte a mano → scollega
+  save(); if(field!=='n')renderAdmDiet();
+}
 function admDelItem(mid,i){DB.diet[admDietDay].meals[mid].splice(i,1);save();renderAdmDiet();}
 function admAddItem(mid){DB.diet[admDietDay].meals[mid].push({n:'',q:'',k:0});save();renderAdmDiet();}
 
@@ -967,11 +1152,20 @@ function exportBackup(){
 }
 function importBackup(input){
   const f=input.files[0]; if(!f)return;
+  input.value=''; // così puoi riprovare con lo stesso file dopo un annullamento
   const r=new FileReader();
   r.onload=()=>{try{
     const d=JSON.parse(r.result);
     if(!d.diet||!d.settings)throw new Error('File non valido');
-    DB=d; persist(); toast('Backup importato ✓'); renderAdmin(); 
+    const n=(d.scans||[]).length, s=(d.sessions||[]).length;
+    if(!confirm(`Importare questo backup?\n\n${n} scansioni · ${s} allenamenti\n\nI dati attuali dell'app verranno SOSTITUITI.`))return;
+    const prev=DB;
+    DB=d;
+    normalizeDB();          // un backup vecchio senza i campi nuovi bloccava l'app al riavvio
+    DB.dataVersion=DATA_VERSION;
+    try{persist();}catch(e){DB=prev;throw e;}
+    toast('Backup importato ✓');
+    renderHome(); renderAdmin();
   }catch(e){toast('⚠️ File non valido');}};
   r.readAsText(f);
 }
@@ -990,9 +1184,11 @@ function openAIChat(){
     ${chips}
     <div class="chat" id="chat"></div>
     <div class="askrow"><input type="text" id="ai-q" placeholder="es. Sto perdendo muscolo?" onkeydown="if(event.key==='Enter')askAI()">
-    <button onclick="askAI()" aria-label="Invia">➤</button></div>`);
+    <button onclick="askAI()" aria-label="Invia">➤</button></div>`,
+    clearChat);   // alla chiusura la conversazione sparisce: si riapre sempre pulita
   renderChat();
 }
+function clearChat(){ DB.chat=[]; save(); }
 function renderChat(){
   const c=$('#chat'); if(!c)return;
   c.innerHTML=DB.chat.map(m=>`<div class="msg ${m.r}">${esc(m.t)}</div>`).join('')||'<div class="note">Fai una domanda sui tuoi progressi, sulla dieta o sugli allenamenti.</div>';
@@ -1009,9 +1205,12 @@ function buildContext(){
     c+=`Variazione totale dall'inizio: peso ${dv(last.peso,first.peso,'kg')}, muscolo ${dv(last.smm,first.smm,'kg')}, grasso ${dv(last.bf,first.bf,'%')} (${dv(last.fatkg,first.fatkg,'kg')}).\n`;
   }
   c+='\nDIETA DI OGGI (giorno '+dd+'):\n';
-  mealsOfDay(dd).forEach(m=>c+=`- ${m.nome} ${m.ora}: ${itemsTxt(m.items)} (${m.kcal} kcal)\n`);
+  const meals=mealsOfDay(dd);
+  meals.forEach(m=>c+=`- ${m.nome} ${m.ora}: ${itemsTxt(m.items)} (${m.kcal} kcal)\n`);
+  const tot=itemsMacro(meals.flatMap(m=>m.items));
+  c+=`Totale del piano di oggi: ${macroTxt(tot)} (P/C/G in grammi).\n`;
   const dl=DB.diary[today()]||{};
-  const done=Object.entries(dl).map(([k,v])=>MEAL_NAMES[k]+': '+(v.st==='ok'?'seguito':v.st==='other'?('altro — '+(v.note||'')+' '+(v.kcal||0)+'kcal'):'saltato')).join('; ');
+  const done=Object.entries(dl).map(([k,v])=>MEAL_NAMES[k]+': '+(v.st==='ok'?'seguito':v.st==='other'?('altro — '+(v.items&&v.items.length?itemsTxt(v.items):(v.note||''))+' '+(v.kcal||0)+'kcal'):'saltato')).join('; ');
   if(done)c+='Registrato oggi: '+done+'\n';
   if(DB.sessions.length){
     c+='\nULTIMI ALLENAMENTI:\n';
@@ -1075,27 +1274,128 @@ async function suggestWeight(){
 }
 
 /* ================================================================
-   NOTIFICHE (best-effort: iOS non permette notifiche programmate
-   ad app chiusa senza un server push — il prompt in Home resta
-   il meccanismo principale)
+   NOTIFICHE
+
+   Cosa iOS permette e cosa no, per non farsi illusioni:
+   · una PWA chiusa NON può essere svegliata da Safari. Non esiste
+     Notification Triggers, e il Web Push richiede un server che
+     mandi il messaggio: GitHub Pages serve file statici, non può.
+   · finché l'app è aperta o appena messa in background i timer
+     girano ancora per un po': è lì che queste notifiche arrivano.
+   Per un promemoria vero a app chiusa c'è l'export del calendario
+   (esportaCalendario) — quello lo gestisce iOS, non il browser.
    ================================================================ */
-function checkNotifications(){
-  if(!DB.settings.notif||!('Notification'in window)||Notification.permission!=='granted')return;
-  const now=new Date(), t=today(), dd=dietDayFor(now);
-  const dayLog=DB.diary[t]||{}; DB.notified[t]=DB.notified[t]||{};
+const NOTIF_RITARDO_MAX = 4*60;  // oltre 4 ore di ritardo il promemoria non serve più
+
+function notifStato(){
+  if(!('Notification' in window)) return {ok:false, cod:'nosupport', txt:'Questo browser non supporta le notifiche. Su iPhone serve Safari, non Chrome.'};
+  const installata = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  if(!installata) return {ok:false, cod:'notinstalled', txt:'L\'app non è installata sulla schermata Home. iOS dà le notifiche alle PWA solo da lì: Condividi → Aggiungi a schermata Home, poi riapri dall\'icona.'};
+  if(Notification.permission === 'denied') return {ok:false, cod:'denied', txt:'Permesso negato. Da qui non si può più chiedere: Impostazioni iOS → Notifiche → FIT·LOG → Consenti notifiche.'};
+  if(Notification.permission === 'default') return {ok:false, cod:'default', txt:'Permesso non ancora concesso: attiva l\'interruttore qui sopra.'};
+  return {ok:true, cod:'granted', txt:'Permesso concesso. Le notifiche arrivano con l\'app aperta o da poco in background.'};
+}
+
+// mostra una notifica; risolve true solo se è andata davvero a buon fine
+async function mostraNotifica(titolo, body, tag){
+  const opt={body, icon:'icons/icon-192.png', badge:'icons/icon-192.png', tag, data:{url:'./index.html'}};
+  try{
+    // serviceWorker.ready non si risolve mai se la registrazione è fallita:
+    // senza timeout la promise restava appesa e non partiva nessun fallback
+    const reg=await Promise.race([
+      navigator.serviceWorker && navigator.serviceWorker.ready,
+      new Promise(r=>setTimeout(()=>r(null),3000))
+    ]);
+    if(reg && reg.showNotification){ await reg.showNotification(titolo,opt); return true; }
+  }catch(_){}
+  try{ new Notification(titolo,opt); return true; }catch(_){}  // su iOS non funziona, su desktop sì
+  return false;
+}
+
+async function testNotifica(){
+  const st=notifStato();
+  if(!st.ok){ toast('⚠️ '+st.cod); renderAdmin(); return; }
+  const ok=await mostraNotifica('FIT·LOG — prova','Se leggi questo, le notifiche funzionano.','test');
+  toast(ok?'Notifica inviata ✓':'⚠️ Invio non riuscito');
+}
+
+// Quali pasti meritano un promemoria adesso. Separata dall'invio così la
+// regola si può verificare senza browser (è qui che stava il bug).
+function pastiDaNotificare(now, inPrimoPiano){
+  if(!DB.settings.notif || !notifStato().ok) return [];
+  // con l'app in primo piano il promemoria è inutile: la card in Home
+  // sta già chiedendo la stessa cosa, e due avvisi uguali danno fastidio
+  if(inPrimoPiano) return [];
+  const t=fmtISO(now), dayLog=DB.diary[t]||{}, fatte=DB.notified[t]||{};
   const hm=now.getHours()*60+now.getMinutes();
-  mealsOfDay(dd).forEach(m=>{
-    const[h,mi]=m.ora.split(':').map(Number), mt=h*60+mi;
-    if(hm>=mt&&hm<=mt+30&&!dayLog[m.id]&&!DB.notified[t][m.id]){
-      DB.notified[t][m.id]=1; save();
-      const body=`Hai ${mealVerb(m.id)} con ${itemsTxt(m.items).toLowerCase()}? (${m.kcal} kcal)`;
-      navigator.serviceWorker?.ready.then(reg=>reg.showNotification('FIT·LOG — '+m.nome,{body,icon:'icons/icon-192.png',badge:'icons/icon-192.png'}))
-        .catch(()=>{try{new Notification('FIT·LOG — '+m.nome,{body});}catch(_){}}); 
-    }
+  return mealsOfDay(dietDayFor(now)).filter(m=>{
+    const [h,mi]=m.ora.split(':').map(Number);
+    const ritardo=hm-(h*60+mi);
+    // prima la finestra era di 30 minuti: se l'app dormiva in quel quarto
+    // d'ora (cioè quasi sempre, iOS sospende le PWA) il promemoria saltava
+    // per sempre. Ora vale finché il pasto è ragionevolmente recente.
+    return ritardo>=0 && ritardo<=NOTIF_RITARDO_MAX && !dayLog[m.id] && !fatte[m.id];
   });
 }
+async function checkNotifications(){
+  const now=new Date(), t=fmtISO(now);
+  const pend=pastiDaNotificare(now, !document.hidden);
+  if(!pend.length) return;
+  DB.notified[t]=DB.notified[t]||{};
+  for(const m of pend){
+    const body=`Hai ${mealVerb(m.id)} con ${itemsTxt(m.items).toLowerCase()}? (${m.kcal} kcal)`;
+    const ok=await mostraNotifica('FIT·LOG — '+m.nome, body, 'pasto-'+t+'-'+m.id);
+    if(!ok) return;                            // niente da fare adesso: si riproverà
+    DB.notified[t][m.id]=1; save();            // segna solo se è partita davvero
+  }
+}
 setInterval(checkNotifications,60000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){renderHome();checkNotifications();}});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){ renderHome(); if($('#tab-admin').classList.contains('on'))renderAdmin(); }
+  else checkNotifications();   // appena vai in background: è la finestra buona su iOS
+});
+
+/* ---- Promemoria pasti nel calendario di iPhone (.ics) ----
+   Questo funziona davvero ad app chiusa, perché l'avviso lo dà iOS.
+   Genera un evento ricorrente settimanale per ogni pasto del piano. */
+const ICS_GG=['','MO','TU','WE','TH','FR','SA','SU'];
+const icsEsc=s=>String(s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r?\n/g,'\\n');
+const icsFold=l=>l.length<=73?l:l.match(/.{1,73}/g).join('\r\n ');  // RFC 5545: righe max 75 ottetti
+function esportaCalendario(){
+  const now=new Date();
+  const stamp=now.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z';
+  const righe=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//FIT-LOG//Promemoria pasti//IT','CALSCALE:GREGORIAN','METHOD:PUBLISH'];
+  let n=0;
+  for(let dd=1; dd<=7; dd++){
+    const wd=((dd-1+DB.settings.giorno1-1)%7)+1;          // giorno di dieta → giorno della settimana
+    for(const m of mealsOfDay(dd)){
+      const [h,mi]=m.ora.split(':').map(Number);
+      // prima occorrenza: il prossimo giorno della settimana giusto
+      const d=new Date(now.getFullYear(),now.getMonth(),now.getDate(),h,mi,0);
+      d.setDate(d.getDate()+((wd-isoWD(d))+7)%7);
+      const p=v=>String(v).padStart(2,'0');
+      const dt=d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'T'+p(h)+p(mi)+'00';
+      const fine=new Date(d.getTime()+15*60000);
+      const dtEnd=fine.getFullYear()+p(fine.getMonth()+1)+p(fine.getDate())+'T'+p(fine.getHours())+p(fine.getMinutes())+'00';
+      righe.push('BEGIN:VEVENT',
+        'UID:fitlog-'+dd+'-'+m.id+'-'+now.getTime()+'@fitlog',
+        'DTSTAMP:'+stamp, 'DTSTART:'+dt, 'DTEND:'+dtEnd,
+        'RRULE:FREQ=WEEKLY;BYDAY='+ICS_GG[wd],
+        icsFold('SUMMARY:'+icsEsc(m.nome+' — '+m.kcal+' kcal')),
+        icsFold('DESCRIPTION:'+icsEsc(itemsTxt(m.items)+'\nApri FIT·LOG per confermare il pasto.')),
+        'BEGIN:VALARM','ACTION:DISPLAY',
+        icsFold('DESCRIPTION:'+icsEsc(m.nome+' — '+itemsTxt(m.items))),
+        'TRIGGER:PT0M','END:VALARM','END:VEVENT');
+      n++;
+    }
+  }
+  righe.push('END:VCALENDAR');
+  const blob=new Blob([righe.join('\r\n')+'\r\n'],{type:'text/calendar'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='fitlog-pasti.ics';
+  a.click(); URL.revokeObjectURL(a.href);
+  toast(n+' promemoria pronti ✓');
+}
 
 /* ---------------- INIT ---------------- */
 loadDB();

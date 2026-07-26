@@ -167,7 +167,10 @@
       <label class="f" style="display:flex;align-items:center;gap:8px;margin-top:14px">
         <input type="checkbox" id="ad-notif" onchange="toggleNotif()"> Notifiche promemoria pasti
       </label>
-      <div class="note">Su iPhone le notifiche funzionano solo con l'app installata in Home (iOS 16.4+) e finché l'app è aperta o in background recente: il promemoria all'apertura resta sempre attivo.</div>
+      <div id="notif-stato"></div>
+      <button class="btn ghost small" style="margin-top:10px" onclick="testNotifica()">Invia una notifica di prova</button>
+      <div class="note" style="margin-top:16px"><b>Promemoria anche ad app chiusa.</b> Safari non può svegliare una PWA chiusa: per un avviso puntuale a ogni pasto esporta i promemoria nel calendario di iPhone. Li gestisce iOS, quindi arrivano sempre.</div>
+      <button class="btn ghost small" onclick="esportaCalendario()">📅 Esporta i pasti nel calendario</button>
       <button class="btn" onclick="saveSettings()">Salva impostazioni</button>
     </div>
   </details>
@@ -237,6 +240,9 @@
   <button data-t="admin"><span class="ic">⚙</span>Admin</button>
 </nav>
 
+<!-- ordine obbligatorio: data-diet usa calcNutr() di data-food per le kcal automatiche -->
+<script src="js/data-food.js"></script>
+<script src="js/data-exercises.js"></script>
 <script src="js/data-diet.js"></script>
 <script src="js/app.js"></script>
 <script>

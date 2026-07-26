@@ -1,8 +1,9 @@
 /* FIT·LOG service worker — app shell offline + cache runtime per libreria esercizi */
-const CACHE = 'fitlog-v3';
+const CACHE = 'fitlog-v5';
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
-  './css/style.css', './js/app.js', './js/data-diet.js', './js/chart.umd.min.js',
+  './css/style.css', './js/app.js', './js/chart.umd.min.js',
+  './js/data-food.js', './js/data-exercises.js', './js/data-diet.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'
 ];
 
@@ -15,6 +16,17 @@ self.addEventListener('activate', e => {
       .then(() => self.clients.claim())
   );
 });
+// Tap sulla notifica: riporta all'app (se è già aperta la mette in primo piano)
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({type:'window', includeUncontrolled:true}).then(list => {
+      for (const c of list) if ('focus' in c) return c.focus();
+      if (self.clients.openWindow) return self.clients.openWindow('./index.html');
+    })
+  );
+});
+
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
